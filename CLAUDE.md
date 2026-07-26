@@ -411,3 +411,53 @@ enough (no dense/padded attention, real sparse GEMM dispatch) that the original 
 are a starting hypothesis, not a settled answer, for this specific case. That's the concrete,
 evidence-backed next step if kernel work is pursued here -- not a guess, a direct consequence of
 this measurement.
+
+## Update: `flex_gemm_sparse_attn` is a severe regression at real shapes, not a free win
+
+Started the sparse-attention investigation flagged above. Before writing any new kernel code, found
+something that changed the whole question: **every script this session (and the real T_run1
+generation) has been forcing `ATTN_BACKEND=sdpa`** -- a convention copied verbatim from
+trellis-mac-mps's env var setup, without checking that `trellis2/modules/sparse/config.py`'s real,
+separate `SPARSE_ATTN_BACKEND` falls back to `ATTN_BACKEND` when unset. This project's own
+capability probe (`docs/probe_m5_max_metal_full_2026.json`) had already confirmed a real, compiled
+Metal kernel -- `flex_gemm_sparse_attn`, backed by `flex_gemm.kernels.metal.sparse_attention_fwd`
+(a real `.metallib` + compiled ObjC++ binding, confirmed by reading the installed package directly,
+not assumed -- a genuine flash-attention-v2-style kernel per `full_attn.py`'s own comment:
+`simdgroup_matrix_multiply_accumulate` for QK^T/PV, `simd_shuffle_xor` for online-softmax) -- is
+auto-selected as the *default* whenever `ATTN_BACKEND` isn't forced. That kernel had never actually
+been benchmarked against the `sdpa` fallback at real shapes, on the real most-expensive model
+(`shape_slat_flow_model_512`) -- worth checking before assuming either that the accidental default
+was right, or that new kernel work was needed.
+
+**Result (`scripts/investigate_flex_gemm_sparse_attn.py`, real DINOv3 conditioning, real sparse
+coords from an actual sparse-structure sample -- 4362 real tokens, 12 heads):**
+
+- **Correctness: fine.** `rel_error=0.000001` against the `sdpa` reference at the real shape (the
+  probe's own correctness check only used a small 16-token synthetic case; this confirms it holds
+  at production scale too).
+- **Speed: a severe regression, not a win.** Isolated kernel call: `sdpa` 13.04ms vs.
+  `flex_gemm_sparse_attn` 608.25ms -- **~47x slower**. Real full-model forward pass (the number
+  that actually matters, per this project's own methodology): `sdpa` 796.05ms vs.
+  `flex_gemm_sparse_attn` **28,614.46ms -- ~36x slower**, turning a sub-second forward pass into a
+  nearly 30-second one.
+
+**Root cause not diagnosed here -- an open question, not a guess dressed up as an answer.**
+Plausible candidates: a large fixed per-call dispatch/compile overhead that would only amortize at
+a much larger token count than this model's real ~4300-4400 tokens; the kernel tuned/validated at a
+very different shape regime than what this model actually produces; or a genuine launch-
+configuration inefficiency in the Metal kernel itself. Not investigated further this session --
+would need the same kind of Metal-source-level investigation the original project applied to its
+own flash-attention kernel work (`investigate_flash_attention_tile_sizes.py`, tile-size sweeps,
+reading the actual kernel), which is out of scope unless this becomes a priority.
+
+**Practical implication: no bug to fix in this project's own scripts.** Forcing `ATTN_BACKEND=sdpa`
+in every script this session, and in the real `T_run1` generation, was -- by pure accident of
+copying the original project's env var convention -- the *correct* choice all along. Leaving it
+unset (to get the real auto-detected default) would have silently made every real generation on
+this port ~36x slower on its most expensive stage. This project's scripts should keep forcing
+`ATTN_BACKEND=sdpa` explicitly going forward, not treat this as something to "fix."
+
+**Worth reporting upstream**, not yet done: whoever maintains `flex_gemm_sparse_attn` in the
+Jourloy/PR#175 lineage has their own auto-detection logic silently picking the ~36x-slower backend
+by default on this hardware/shape regime -- a real, concrete, actionable finding for that fork, not
+just useful internally here.
