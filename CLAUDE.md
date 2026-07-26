@@ -159,3 +159,30 @@ Next real step once auth is done: run `scripts/generate_asset.py` end to end, co
 *then* move on to the actual differentiated work described above (bypass measurement, framework
 comparison, etc.) — do not skip straight to kernel work before confirming the baseline pipeline
 produces correct output on this machine.
+
+## Update: from-scratch DINOv3 architecture built while blocked on gated access (this session)
+
+While waiting on Meta's manual review for `facebook/dinov3-vitl16-pretrain-lvd1689m` (see the
+weight-download blocker above), built a real, paper-faithful DINOv3 ViT-L/16 implementation from
+the actual paper (arXiv:2508.10104) in `dinov3_from_scratch/`: architecture (RoPE, register
+tokens, SwiGLU), and the full training objective (DINO + iBOT + KoLeo + Gram anchoring losses).
+Verified correct on real MPS hardware: full ViT-L/16 config (304.6M params, matching the real
+model's ~300M) forward-passes cleanly, and a full backward pass reaches all 32 tested parameters
+with nonzero gradients through a real optimizer step. See `dinov3_from_scratch/README.md` for the
+honest, explicit statement of what this is and isn't -- **this is an architecture-correctness
+artifact, not a substitute for the real pretrained checkpoint.** DINOv3's actual capability comes
+from training on 1.7B images (LVD-1689M, not public) over 256 GPUs per the paper; nothing built
+here reproduces that, and it should not be used in place of the real gated checkpoint once access
+is granted.
+
+User has DGX pod access (see this project's memory / the parent trellis-mac-mps project's own DGX
+notes) -- a genuine small-scale training smoke-test (real losses decreasing, no bugs, on a small
+public dataset) is feasible as a pipeline-correctness exercise and is a reasonable next step if
+pursued further, but is explicitly NOT a path to matching Meta's actual trained quality. Not yet
+attempted as of this writing.
+
+**Status of the actual blocker this was built around**: still waiting on Meta's manual approval
+for DINOv3 gated access (`gated: manual`, confirmed via the HF API) and re-checking on a 30-minute
+schedule. RMBG-2.0 (`gated: auto`) was also still returning 401 as of the last check despite being
+reported as accepted -- worth re-verifying once DINOv3 clears, since an auto-gate should not
+behave this way if the accept flow actually completed.
