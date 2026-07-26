@@ -533,5 +533,55 @@ hardware/shapes where the gap to `sdpa` might close), not a reason to switch thi
 **Worth reporting upstream to `pedronaugusto/mtlgemm`** -- a real, verified bug (confirmed
 correctness, confirmed ~4x internal speedup from the fix) affecting anyone running this kernel on
 Apple Silicon with head_dim=128 half-precision models, which is a common shape (many models use
-128-dim heads). Not yet done -- the fix is saved as a patch in this repo; opening an upstream
-issue/PR is a reasonable next step but wasn't done without explicit direction to do so.
+128-dim heads). **Update: done.** Issues are disabled on that repo, so opened a PR instead (forked
+to `vinayapathak/mtlgemm`, branch `fix/sparse-attn-flash-head-dim-128`):
+[pedronaugusto/mtlgemm#2](https://github.com/pedronaugusto/mtlgemm/pull/2).
+
+## Update: dense-attention findings do NOT simply transfer -- native SDPA loses to naive here
+
+Checked, rather than assumed, whether the original project's dense-attention conclusions (native
+SDPA beats a hand-rolled 3-op reimplementation by 1.43x; every `sdpa_kernel` backend override
+resolves identically) transfer to TRELLIS.2's `sparse_structure_flow_model`. First, a real
+architectural difference confirmed directly from the model config: this model uses
+**`use_rope=True`** (`pe_mode='rope'`), unlike the original TRELLIS's `use_rope=False`. The
+original project's quantized-attention (`matmul2d` int8) kernel explicitly `raise
+NotImplementedError` for `use_rope=True` -- a deliberate guard, not an oversight -- so that kernel
+cannot be ported here as-is; porting it would require adding real RoPE support first, un-started
+work, out of scope for this check. Ran the two lighter checks that don't need new kernel
+infrastructure instead (`scripts/investigate_dense_attn_transfer.py`, real DINOv3 conditioning,
+real post-RoPE Q/K/V captured from an actual forward pass via monkeypatch, not hand-replayed):
+
+**Check 1 result -- reverses the original finding, doesn't confirm it:**
+
+| | time/call |
+|---|---|
+| native `sdpa` | 26.744ms |
+| naive hand-rolled (QK^T -> softmax -> @V) | **8.161ms -- 3.3x faster than SDPA** |
+
+(`rel_error=0.002749` between the two outputs -- fine, consistent with ordinary bf16
+accumulation-order noise between a fused kernel and a naive one, not a correctness concern.)
+
+This is the **opposite direction** from the original project's finding (native SDPA beating
+hand-rolled by 1.43x there). Real shape: `(1, 4096, 12, 128)` bf16, post-RoPE. Root cause not
+determined -- plausible, unconfirmed candidates: RoPE's rotation step interacting badly with
+whatever fused kernel MPS's SDPA resolves to at this shape; `head_dim=128` specifically (the
+original project's own dense-attention work was on a different, unrecorded head_dim); this exact
+sequence length (4096, a 16x16x16 dense voxel grid); or a genuine MPS SDPA performance cliff at
+this particular shape family. None of these confirmed -- flagged as open, not asserted.
+
+**Check 2 result -- this part DOES transfer.** All `sdpa_kernel` backend overrides resolve to
+essentially identical real full-model timing (default 1875ms, MATH 1910ms, EFFICIENT_ATTENTION
+1983ms, FLASH_ATTENTION 1909ms, CUDNN_ATTENTION 1904ms, OVERRIDEABLE 1905ms) -- matching the
+original project's finding that PyTorch collapses all of these to the same underlying MPS
+implementation on this hardware. No alternative backend is worth switching to here either.
+
+**Implication: do not assume the original project's dense-attention kernel ceiling ("no real
+headroom, quantization/hand-rolled kernels don't beat native SDPA") applies to TRELLIS.2.** Check 1
+shows a real, large, measured gap in the opposite direction -- a naive, unoptimized reimplementation
+already beats native SDPA by 3.3x at this model's real shape. This is a genuinely promising,
+previously-unknown lead specific to TRELLIS.2 (not present in the original project, not something
+the "likely transfers" note in the bypass-measurement update above predicted correctly) -- worth
+real kernel investigation (why does SDPA regress here specifically, and can a real Metal kernel
+built around what makes the naive version fast be made both correct at scale and robust, the same
+rigor this project's other kernel work has applied) if pursued further. Not yet pursued past this
+point -- this update stops at "real, verified signal that headroom exists," not a working kernel.
