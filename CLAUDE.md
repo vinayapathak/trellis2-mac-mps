@@ -256,8 +256,17 @@ working fix kept drift small enough that mesh vertex counts stayed stable across
 This is a real negative result, not a bug to chase further before reporting it.
 
 **Root-cause hypothesis, not yet independently isolated** (two confounded differences from the
-original project's setting, both plausible contributors per AB-Cache's own published finding that
-higher `cfg_strength` amplifies staleness error):
+original project's setting -- NOTE, corrected after actually reading AB-Cache (arXiv:2504.10540)
+directly: the "higher cfg_strength amplifies staleness error" framing below was attributed to
+AB-Cache in this project's earlier notes, but AB-Cache's own text (Sections 3.3-3.4, read directly)
+says nothing about CFG or guidance strength at all -- it caches/extrapolates the raw network output
+across diffusion *timesteps*, an entirely different axis from the cond/uncond CFG-branch caching
+this port does. The "cfg_strength amplifies staleness" claim may originally trace to FasterCache
+(arXiv:2410.19355, cited alongside AB-Cache in this project's earlier work) but that has NOT been
+re-verified against FasterCache's actual text in this session either -- don't treat it as confirmed
+either way until someone actually reads that paper directly, the same standard just applied to
+AB-Cache. The underlying observation (larger guidance strength = more sensitive to a stale value)
+remains a reasonable, independently-plausible hypothesis on its own terms regardless of attribution):
 1. TRELLIS.2's real production config uses **`guidance_strength=7.5`** vs. the original project's
    `cfg_strength=5.0` (in the original's convention, `guidance_strength = 1 + cfg_strength`, so
    this is 7.5 vs. 6.0 on a like-for-like basis -- still meaningfully higher).
@@ -273,8 +282,12 @@ higher `cfg_strength` amplifies staleness error):
 (or ship it as a claimed speedup) on TRELLIS.2's real 12-step config as of this writing.** The file
 stays in the tree (this project's non-destructive versioning convention) with this finding, not
 deleted -- the mechanism is correct and may be useful if TRELLIS.2 is later run at a higher step
-count, or with a smaller/adaptive interval (AB-Cache's actual error-gated trigger, still on this
-project's open list, is the more promising next step over a fixed interval given this result).
+count, or with AB-Cache's REAL technique applied to the diff-caching axis: order-k Adams-Bashforth
+linear extrapolation of the cached diff, in place of the current zero-order hold (see the
+correction above -- AB-Cache is fixed-schedule, not adaptive; its actual contribution is a
+higher-order extrapolator with a proven `O(h^k)` error bound vs. naive reuse's `O(h)`, which is a
+concrete, different thing to try next, not "smaller/adaptive interval" as this note previously and
+wrongly said).
 **Only single-image/single-seed tested here** -- weaker rigor than the original project's
 6-combination check; that gap doesn't change the conclusion (the error margin is too large to be
 seed/image noise) but is worth closing before fully retiring the idea.
@@ -283,3 +296,66 @@ This *is* still real, novel work -- as far as this project can tell, nobody else
 benchmarked CFG difference-caching against TRELLIS.2, and a clean negative result with a grounded
 root-cause hypothesis is a legitimate, honestly-reported finding, consistent with how the original
 project treated its own kernel ceilings.
+
+## Update: tried AB-Cache's REAL technique (order-k extrapolation) -- makes it worse, not better
+
+First, a correction to the section above and to this project family's other docs (also fixed in
+trellis-mac-mps's CLAUDE.md/APPLE_SILICON.md this session): **AB-Cache (arXiv:2504.10540) is NOT
+adaptive or error-gated.** That characterization, stated as fact in earlier notes, was never
+checked against the paper and was wrong. Read the actual PDF directly this session. What AB-Cache
+really does: the exact same fixed schedule as naive caching (real compute every N-th step, cached
+otherwise) -- its real contribution is replacing *naive zero-order-hold reuse* at the cached steps
+with a k-th order Adams-Bashforth linear extrapolation (Eq. 3.6: a binomial-coefficient-weighted
+combination of the previous k REAL values), with a proven `O(h^k)` truncation error vs. naive
+reuse's `O(h)`. For flow matching (this pipeline's family), the paper says to drop the exponential
+term, leaving a pure linear-coefficient extrapolator. k=1 reduces exactly to the zero-order hold
+already tried above.
+
+Implemented this for real: `ABCacheDiffFlowEulerGuidanceIntervalSampler`
+(`trellis2/pipelines/samplers/flow_euler_ab_cache.py`) applies the k-th order extrapolation formula
+to the cached CFG diff (this project's existing caching axis), at the same `neg_cache_interval=2`
+schedule already benchmarked. Scope note, stated in the file's own docstring: the real paper applies
+this to the raw network output across diffusion *timesteps*; this applies the same formula (the
+math, not the paper's literal use case) to the diff-caching axis already built here -- flagged so
+it isn't mistaken for "AB-Cache itself, ported."
+
+**Result (`scripts/investigate_ab_cache.py`, same image/seed as the run above, order=1/2/3, all at
+`neg_cache_interval=2`):**
+
+| stage            | order | speedup | rel_error |
+|------------------|-------|---------|-----------|
+| sparse_structure  | 1 (= zero-order hold, sanity check) | 1.296x | 0.439216 |
+| sparse_structure  | 2     | 1.197x  | **0.620797** |
+| sparse_structure  | 3     | 1.170x  | **0.913898** |
+| shape_slat        | 1 (sanity check) | 1.259x | 0.451514 |
+| shape_slat        | 2     | 1.276x  | **0.517827** |
+
+The order=1 rows reproduce the earlier zero-order-hold numbers essentially exactly (`0.439216` and
+`0.451514`, both bit-for-bit matches to the earlier run) -- confirms the new class is implemented
+correctly, not buggy. **Higher order makes the error WORSE, monotonically, on both stages -- the
+opposite of the paper's own ablation (their Table 3 shows quality improving with order).** This is
+consistent (not a fluke on one stage) and large (order=3 nearly doubles rel_error vs. order=1).
+
+**Root-cause hypothesis, not yet independently isolated:** AB-Cache's `O(h^k)` error bound is an
+*asymptotic* bound -- valid as the step size `h` gets small, with a bigger implicit constant at
+higher order. The paper's own experiments run 50-step schedulers with fine, roughly-uniform
+timestep spacing, where that asymptotic regime plausibly holds. TRELLIS.2's real config instead
+uses only 12 total steps, an aggressive `rescale_t` warp (3.0-5.0, front-loading step density into
+the high-noise region), and a guidance interval where the cached diff is only sampled every other
+step (`neg_cache_interval=2`) -- a large effective step size relative to however fast the true diff
+trajectory actually curves. A linear (order=2) or quadratic (order=3) extrapolant fit through 2-3
+widely-spaced, possibly non-monotonic real samples can overshoot the true trajectory by more than a
+flat hold would, even though the *asymptotic* bound favors the higher-order fit as `h -> 0`. This
+has NOT been isolated from the confound already noted above (guidance_strength=7.5, few total
+steps) -- a real follow-up (not attempted here) would be testing whether higher order actually
+helps at a finer step count (e.g. steps=25+) where the paper's own asymptotic regime is more likely
+to hold, which would confirm or kill this hypothesis directly.
+
+**Conclusion: neither the zero-order-hold diff-cache nor AB-Cache's real higher-order extrapolation
+is usable on TRELLIS.2's actual 12-step production config as of this writing.** Both `*.py` files
+stay in the tree per this project's convention, both documented as real, measured negative results,
+not deleted or hidden. The honest state of the CFG-caching investigation for TRELLIS.2: a real
+speedup (1.17x-1.30x) is consistently available at `neg_cache_interval=2`, but every reuse strategy
+tried so far (flat hold, order-2, order-3 extrapolation) costs more accuracy than this project
+judges acceptable to ship. Rigorous negative-result research, same standard the original project
+applied to its own kernel ceilings -- not a failure to hide.
