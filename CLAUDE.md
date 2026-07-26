@@ -105,3 +105,26 @@ honestly. Apply the same discipline here from the start rather than relearning i
   report a directional finding as confirmed — see trellis-mac-mps's own `research.md` entry on the
   ViT-L/14 finding that didn't replicate, caught only via 8 independent re-runs, for a concrete
   example of why this matters in this exact family of project.
+
+## Update: base capability confirmed on M5 Max (this session)
+
+Ran `scripts/probe_macos.py` against a fresh `requirements_macos.txt` install (`.venv`, no Metal
+extensions built yet) on the verified Apple M5 Max. Result: `"ok": true` overall.
+- MPS available and functional (matmul parity check against MLX passed: both report 3680.0).
+- MLX functional.
+- SDPA functional (`sparse_backends.attention: "sdpa"`).
+- Metal compiler found, and its path confirms the actual M5-specific toolchain is in use
+  (`.../MetalToolchain-v17.6.109.0.M5u60P/...`), not a generic/cached one.
+- Sparse convolution falls back to pure PyTorch (`sparse_backends.convolution: "pytorch"`) since
+  the compiled Metal extensions (`flex_gemm`, `mtldiffrast`, `mtlbvh`, `mtlmesh`, `cumesh`) are not
+  installed by `requirements_macos.txt` alone -- those are separate pinned-commit Metal source
+  builds normally done by `scripts/setup_macos.sh`, not yet run this session.
+- Raw probe output saved: `docs/probe_m5_max_2026.json`.
+
+This confirms the pure-PyTorch/MPS/SDPA fallback path genuinely works on this exact hardware --
+the first real data point on any Apple Silicon generation beyond the M4 Max the upstream PR was
+validated on. Real generation (`scripts/generate_asset.py`) has NOT been run yet: it needs
+`hf auth login` under the user's own Hugging Face account plus accepting DINOv3 and RMBG-2.0's
+gated-model terms -- a credential/consent step for the user to do themselves, not automated
+around. Building the accelerated Metal extensions (`scripts/setup_macos.sh`, or `SKIP_METAL=1` for
+the pure fallback path) also not yet done.

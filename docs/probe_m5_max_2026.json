@@ -1,0 +1,61 @@
+[SPARSE] Conv backend: pytorch; Attention backend: sdpa
+{
+  "backends": {
+    "capability_probes": {
+      "mesh_bvh": {
+        "error": "Metal mesh/BVH backend is disabled or unavailable",
+        "ok": false
+      },
+      "rasterizer": {
+        "error": "Metal rasterizer is disabled or unavailable",
+        "ok": false
+      }
+    },
+    "cuda_available": false,
+    "errors": {
+      "cumesh": "No module named 'cumesh'",
+      "flex_gemm": "No module named 'flex_gemm'",
+      "mtldiffrast": "No module named 'mtldiffrast'",
+      "nvdiffrast": "No module named 'nvdiffrast'"
+    },
+    "fast_simplification": true,
+    "flex_gemm": false,
+    "mesh": null,
+    "metal_disabled": false,
+    "mps_available": true,
+    "platform": "Darwin",
+    "rasterizer": null,
+    "trimesh": true
+  },
+  "failures": [],
+  "kdtree_probe": {
+    "distance": 0.17320508075688776,
+    "index": 0
+  },
+  "metal_compiler": {
+    "available": true,
+    "error": null,
+    "path": "/var/run/com.apple.security.cryptexd/mnt/com.apple.MobileAsset.MetalToolchain-v17.6.109.0.M5u60P/Metal.xctoolchain/usr/bin/metal"
+  },
+  "mlx_matmul_sum": 3680.0,
+  "mps_available": true,
+  "mps_built": true,
+  "mps_matmul_sum": 3680.0,
+  "ok": true,
+  "platform": {
+    "machine": "arm64",
+    "system": "Darwin"
+  },
+  "sdpa_shape": [
+    2,
+    2,
+    8,
+    16
+  ],
+  "sparse_backends": {
+    "attention": "sdpa",
+    "convolution": "pytorch",
+    "metal_attention_parity": false
+  },
+  "torch": "2.13.0"
+}
