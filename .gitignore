@@ -215,8 +215,10 @@ weights/
 # CoreML exported models
 export/coreml_models/
 
-# Generated output
+# Generated output (scripts/generate_asset.py's own --output-dir convention is "outputs/", per
+# this repo's README examples -- "output/" alone was stale and never matched anything)
 output/
+outputs/
 
 # Debug scripts (dev-only)
 debug_*.py

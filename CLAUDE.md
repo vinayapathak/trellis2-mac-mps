@@ -186,3 +186,48 @@ for DINOv3 gated access (`gated: manual`, confirmed via the HF API) and re-check
 schedule. RMBG-2.0 (`gated: auto`) was also still returning 401 as of the last check despite being
 reported as accepted -- worth re-verifying once DINOv3 clears, since an auto-gate should not
 behave this way if the accept flow actually completed.
+
+## Update: gated access cleared, real end-to-end generation confirmed on M5 Max
+
+**Root cause of the RMBG-2.0 401 anomaly, found while unblocked**: the CLI's HF login had been
+done via the `hf` CLI's browser OAuth flow, which carries scopes fixed at token-creation time --
+it does not automatically pick up gated-repo access granted to the account afterward. Fix: a
+fresh classic "Read" token from https://huggingface.co/settings/tokens, `hf auth login` with that
+instead. Confirmed both gates open with a direct API check (`GET /api/models/<repo>` -> 200) for
+both `facebook/dinov3-vitl16-pretrain-lvd1689m` and `briaai/RMBG-2.0` immediately after switching
+tokens -- this was the real fix, not a propagation-delay wait.
+
+Ran `scripts/generate_asset.py assets/example_image/T.png --output-dir outputs/T_run1
+--pipeline-type 512 --seed 42` end to end. **Real success, `status: "ok"` in `meta.json` for both
+outputs:**
+- `raw_full.glb`: 68MB, 3,047,718 triangles, 1,442,900 vertices (welded).
+- `candidate_pbr.glb`: 147MB, 3,119,520 triangles, 3,504,194 vertices (raw, pre-weld), textured +
+  remeshed (`remesh_band=1.0, remesh_project=0.7`), baker=`metal`.
+- Both non-watertight (expected/normal for this kind of output, not a bug) -- `candidate_pbr` has
+  1,790 connected components, `raw_full` has 42.
+- Bounds sane and consistent between raw/PBR (~1.0 x 0.92 x 0.41), matching the input image's
+  proportions.
+- Backend confirmed real accelerated path throughout: `resolved_backend: mps`, `flex_gemm: true`,
+  `mesh/rasterizer: metal` -- not the pure-PyTorch fallback.
+- Timings: `pipeline_load` 524.8s (includes the remaining weight downloads), `generation` 543.9s,
+  `pbr_export` 118.9s, **total 1188.5s (~19.8 min)**. `peak_rss_bytes`: ~11.1GB.
+- This is, as far as this project can tell, the **first confirmed real end-to-end TRELLIS.2
+  generation on any Apple Silicon Mac, gated weights and all** -- none of the prior community
+  efforts (`pedronaugusto/trellis2-apple`, `shivampkumar/trellis-mac`) or PR #175 itself have a
+  documented successful real-checkpoint run; all prior validation on this exact machine (M5 Max)
+  was capability-probe-only (base MPS/MLX/SDPA and the accelerated Metal extension stack), not
+  real generation.
+
+Also fixed a stale `.gitignore` entry found in the process: `output/` (singular) never matched
+this project's actual `outputs/` (plural) convention, per this project's own README examples --
+`outputs/` was untracked and about to be accidentally committable. Fixed, not just noted.
+
+**Real generation confirmed. Next step, per "What the actual differentiated contribution here
+should be" above: start the bypass measurement (item 1)** -- do not start kernel work or claim
+any speedup before that. Note also that `trellis2/pipelines/samplers/flow_euler_cached_cfg.py`
+(a port of the original project's CFG difference-caching, item 3) already exists in the working
+tree as of this update, uncommitted, with its own docstring stating it is **not yet benchmarked
+or quality-verified on this model** -- do not treat it as done; verify it the same way the
+original project's version was verified (real drift check across multiple (image, seed)
+combinations, not assumed to transfer given the different guidance_strength: 7.5 here vs. 5.0 in
+the original) before relying on it or reporting a speedup.
