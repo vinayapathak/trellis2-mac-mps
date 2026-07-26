@@ -461,3 +461,77 @@ this port ~36x slower on its most expensive stage. This project's scripts should
 Jourloy/PR#175 lineage has their own auto-detection logic silently picking the ~36x-slower backend
 by default on this hardware/shape regime -- a real, concrete, actionable finding for that fork, not
 just useful internally here.
+
+## Update: root-caused and fixed the `flex_gemm_sparse_attn` regression -- real improvement, still not a win
+
+Found the actual root cause by reading the vendored kernel source directly (not guessed) --
+`flex_gemm` is built from source at `~/.cache/trellis2/source-deps/mtlgemm-<sha>/` (from
+`pedronaugusto/mtlgemm`, pinned by `scripts/setup_macos.sh`'s `MTLGEMM_SHA`), so the real `.metal`
+kernel and its C++ dispatcher (`ext.mm`) were both available to inspect, not just the compiled
+binary.
+
+**Two-part bug, both confirmed by reading the code, not assumed:**
+1. `ext.mm`'s dispatcher gates the fast tiled flash-attention-v2 kernel behind a hardcoded
+   `C_q <= 64` check, with a comment stating this was sized for **fp32** ("fp32/head_dim=64 uses
+   ~28KB of the 32KB limit"). TRELLIS.2's real `shape_slat_flow_model_512` runs in **bfloat16**
+   with **head_dim=128** (confirmed directly: `model_channels=1536, num_heads=12 -> head_dim=128`)
+   -- so every real call silently fell through to the "naive per-thread-serial-KV kernel," which
+   the code's own comment documents as losing "asymptotically as max_seqlen grows." That's the
+   entire 36x regression documented in the update above.
+2. Even after loosening the gate, `sparse_attn_tiled.metal`'s per-thread output accumulator was a
+   compile-time-sized register array, `simdgroup_matrix<float,8,8> o_acc[MAX_HEAD_DIM / 8]`, with
+   `MAX_HEAD_DIM` hardcoded to 64 (only 8 slots) -- too small for head_dim=128 (needs 16). The
+   kernel's actual runtime loop logic (`n_tiles_cv = C_v / 8`, cooperative smem loads sized from
+   `C_q`/`C_v` via a raw `threadgroup uchar*` pointer with runtime-computed offsets) was already
+   fully generic -- only this one compile-time array size needed to change.
+
+**The fp32 cutoff wasn't a real hardware constraint, confirmed by direct measurement, not
+assumption**: queried this machine's actual `MTLDevice.maxThreadgroupMemoryLength` directly (a
+small compiled Obj-C probe) -- **32768 bytes** on the real M5 Max. At bf16/head_dim=128 the same
+tile configuration (`BLOCK_Q=16, BLOCK_KV=32`) needs only **~31.1KB** -- under budget, just with
+less headroom than fp32/head_dim=64's ~28KB.
+
+**Fix applied** (both files at
+`~/.cache/trellis2/source-deps/mtlgemm-867aec8234299a7fe1ede7f802c8debe5a939a82/`, saved durably as
+`patches/mtlgemm-867aec82-flash-attn-head-dim-128.patch` in this repo since the source-deps cache
+dir is NOT version-controlled and a fresh `scripts/setup_macos.sh` run would silently re-clone the
+pristine, unfixed source):
+- `sparse_attn_tiled.metal`: `#define MAX_HEAD_DIM 64` -> `128`.
+- `ext.mm`: `flash_eligible` changed from a hardcoded `C_q <= 64` to an actual computed
+  shared-memory-footprint check (`shared_mem <= 32768`, dtype-aware via the existing `elem_bytes`
+  calculation) -- correctly still restricts fp32 to a smaller effective head_dim while allowing
+  fp16/bf16 up to 128, rather than one fixed number for all dtypes.
+- Rebuilt cleanly via `pip install --no-build-isolation <source-deps path>`, no build errors.
+
+**Result, verified with a clean, controlled, single-shape comparison (not the noisier full-pipeline
+run, which showed real run-to-run baseline variance -- see caveat below)**: real bf16, head_dim=128,
+3416 tokens, `FLEX_GEMM_ATTN_KERNEL` forced explicitly per variant to isolate the comparison from
+gating logic:
+
+| kernel | time/call |
+|---|---|
+| naive (old default for this shape) | 517.76ms |
+| **tiled (now reachable after the fix)** | **126.64ms -- 4.1x faster than naive** |
+| native `sdpa` | 13.77ms |
+
+**The fix is real and verified** -- correctness held (`rel_error=0.000001` against `sdpa`,
+unchanged after the fix), and the tiled kernel is genuinely, substantially faster than the naive
+fallback it was incorrectly excluded from. Real full-model forward-pass timing corroborates this
+independently: 28,614ms (pre-fix, naive) -> 6,380ms (post-fix, tiled) -- a ~4.5x improvement,
+consistent with the isolated tiled-vs-naive ratio above.
+
+**But it still does not beat native `sdpa`.** Even fixed and correctly routed to the fast kernel,
+`flex_gemm_sparse_attn` remains roughly **9x slower in isolation** and **~2.8x-8x slower
+full-model** (the full-model gap's range reflects real, unexplained `sdpa` baseline variance
+between runs -- 796ms in one run, 2,304ms in another, same shape family, not yet root-caused;
+flagged honestly rather than cherry-picking the more favorable comparison). This project's own
+practical choice -- forcing `ATTN_BACKEND=sdpa` -- remains correct. The value of this fix is real
+but narrower than "closes the gap": it makes the tiled kernel usable and ~4x faster than its own
+broken fallback for anyone who needs it (e.g. `FLEX_GEMM_ATTN_KERNEL=tiled` explicitly, or future
+hardware/shapes where the gap to `sdpa` might close), not a reason to switch this project's default.
+
+**Worth reporting upstream to `pedronaugusto/mtlgemm`** -- a real, verified bug (confirmed
+correctness, confirmed ~4x internal speedup from the fix) affecting anyone running this kernel on
+Apple Silicon with head_dim=128 half-precision models, which is a common shape (many models use
+128-dim heads). Not yet done -- the fix is saved as a patch in this repo; opening an upstream
+issue/PR is a reasonable next step but wasn't done without explicit direction to do so.
