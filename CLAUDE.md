@@ -359,3 +359,55 @@ speedup (1.17x-1.30x) is consistently available at `neg_cache_interval=2`, but e
 tried so far (flat hold, order-2, order-3 extrapolation) costs more accuracy than this project
 judges acceptable to ship. Rigorous negative-result research, same standard the original project
 applied to its own kernel ceilings -- not a failure to hide.
+
+## Update: bypass measurement -- attention dominates both flow models, same as the original project
+
+Ran `scripts/investigate_bypass_measurement.py`: the measurement flagged as item 1 of "What the
+actual differentiated contribution here should be" above, not started until now. Method: same as
+the original trellis-mac-mps project's Section 4 (APPLE_SILICON.md) -- monkeypatch a submodule
+class's `forward` to return zeros (the correct no-op for a residual-add block), time N real forward
+passes of the full flow model with/without the bypass, attribute the wall-clock drop to that
+submodule. Real conditioning (DINOv3 on `assets/example_image/T.png`) and real sparse coords (from
+an actual sparse-structure sample+decode, not synthetic), on this machine's real M5 Max.
+
+**Result, both of TRELLIS.2's flow models measured (`N=8` timed passes, `warmup=3`):**
+
+| model | native | self_attn | cross_attn | both attn | mlp | residual (norms/I-O/t-embed) |
+|---|---|---|---|---|---|---|
+| `sparse_structure_flow_model` (dense tokens, dense attention) | 607.95ms | 53.7% | 16.8% | **70.9%** | 17.1% | 10.3% |
+| `shape_slat_flow_model_512` (sparse O-Voxel tokens, flex_gemm-backed) | 656.67ms | 49.8% | 20.4% | **68.8%** | 19.9% | 13.8% |
+
+Both models were bypass-all'd as a sanity floor (norms/I-O layers/timestep-embedder only): 10.3%
+and 13.8% respectively -- the individual contributions roughly sum to the rest (attention + mlp +
+residual ~= 98-102% in both cases, consistent with additive contributions and no major unaccounted
+cost hiding elsewhere in either model).
+
+**This directly answers the open question CLAUDE.md's "What the actual differentiated contribution
+here should be" section posed: does the original project's ~77% attention / ~11% FFN split
+transfer to TRELLIS.2?** Measured, not assumed: **yes, broadly** -- both flow models land at
+~69-71% combined attention and ~17-20% FFN, close to the original TRELLIS's ~77%/~11% split despite
+one of these two models running on a structurally different backbone (sparse O-Voxel tokens through
+this project's own flex_gemm-equivalent Metal kernels, rather than the original's dense/regular
+sparse-conv U-Net backbone). Also consistent across both models here: self-attention costs roughly
+2.5-3x what cross-attention does (~50% vs. ~17-20%) -- the conditioning sequence cross-attends
+against is much shorter than the self-attention token count in both cases, so this asymmetry is
+expected, not surprising.
+
+**Implication for what to do next, per this project's own stated priority order:** since attention
+is confirmed to dominate here too, the original project's extensive real, already-completed
+attention kernel investigation on this exact hardware family (Apple Silicon MPS, M5 Max) --
+documented in trellis-mac-mps's `APPLE_SILICON.md` under "Applying the FFN pattern to attention"
+and "Beyond Linear quantization: SDPA itself..." -- is directly relevant background before starting
+any new kernel work here, not a different problem needing rediscovery. That investigation's real,
+measured ceilings (quantized attention nets 0.98x whole-model, i.e. no net win; native SDPA beats
+every alternative backend and a hand-rolled reimplementation; the custom flash-attention kernel
+progression tops out at 1.17x slower than native, not a real win) were established on the original
+TRELLIS's dense self-/cross-attention. TRELLIS.2's dense model (`sparse_structure_flow_model`) is
+close enough in structure that those findings likely transfer directly and probably don't need
+re-litigating from scratch. **What's genuinely untested is the sparse case** --
+`shape_slat_flow_model_512`'s `SparseMultiHeadAttention`, running through this project's own
+flex_gemm-equivalent Metal path on variable-length sparse token sets, is architecturally different
+enough (no dense/padded attention, real sparse GEMM dispatch) that the original project's findings
+are a starting hypothesis, not a settled answer, for this specific case. That's the concrete,
+evidence-backed next step if kernel work is pursued here -- not a guess, a direct consequence of
+this measurement.
