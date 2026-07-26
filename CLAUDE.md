@@ -128,3 +128,34 @@ validated on. Real generation (`scripts/generate_asset.py`) has NOT been run yet
 gated-model terms -- a credential/consent step for the user to do themselves, not automated
 around. Building the accelerated Metal extensions (`scripts/setup_macos.sh`, or `SKIP_METAL=1` for
 the pure fallback path) also not yet done.
+
+## Update: full Metal extension stack built and verified on M5 Max (this session)
+
+Ran `scripts/setup_macos.sh` end to end (Python 3.11 venv, `torch==2.13.0`/`torchvision==0.28.0`
+primary pair — no ABI fallback needed, clean first-try success). All four pinned Metal extensions
+built from source and installed successfully:
+- `mtlbvh` @ `23f441c470ce1f537e1fd836f3ffb5b8245f7975`
+- `mtldiffrast` @ `4668cd91cb6d27f5e264731f94a06841fbf7aab8`
+- `mtlmesh` @ `212079e55772cff3d648a21372392c37e0643f3b` (pulls in `cubvh`/`eigen` submodules)
+- `mtlgemm` @ `867aec8234299a7fe1ede7f802c8debe5a939a82`
+- `o-voxel` (editable install)
+
+`scripts/probe_macos.py --require-metal` passes cleanly: mesh/BVH ok, rasterizer ok (Metal
+backend, not CPU), `flex_gemm: true`, and — the meaningful upgrade from the earlier pure-PyTorch
+probe — `sparse_backends` now reports `"attention": "flex_gemm_sparse_attn"`,
+`"convolution": "flex_gemm"`, `"metal_attention_parity": true`. This is the real, accelerated
+Metal path, not the CPU/pure-PyTorch fallback recorded earlier this session. `pip check`: no
+broken requirements. Full raw output: `docs/probe_m5_max_metal_full_2026.json`.
+
+This is, as far as this project can tell, the first confirmed verification of the complete
+accelerated Metal extension stack (all four extensions, not just base MPS/MLX/SDPA) on an M5 Max
+specifically -- the upstream PR's own validation was on an M4 Max.
+
+**Remaining blocker to actual generation, unchanged**: `hf auth login` under the user's own
+Hugging Face account, plus accepting DINOv3 and RMBG-2.0's gated license terms. The build itself
+prints this reminder automatically now that the environment is otherwise ready.
+
+Next real step once auth is done: run `scripts/generate_asset.py` end to end, confirm real output,
+*then* move on to the actual differentiated work described above (bypass measurement, framework
+comparison, etc.) — do not skip straight to kernel work before confirming the baseline pipeline
+produces correct output on this machine.
