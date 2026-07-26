@@ -231,3 +231,55 @@ or quality-verified on this model** -- do not treat it as done; verify it the sa
 original project's version was verified (real drift check across multiple (image, seed)
 combinations, not assumed to transfer given the different guidance_strength: 7.5 here vs. 5.0 in
 the original) before relying on it or reporting a speedup.
+
+## Update: CFG difference-caching ported and benchmarked -- real, honest negative result
+
+Ran `scripts/investigate_cfg_caching_diff.py` (single image `assets/example_image/T.png`, single
+seed) against the real pretrained TRELLIS.2-4B weights, on `sparse_structure_sampler` and
+`shape_slat_sampler` (the two stages with a real two-branch CFG call per step at
+`guidance_strength=7.5`; `tex_slat_sampler` runs at `guidance_strength=1.0` so has no negative
+branch to cache and was correctly excluded).
+
+**Caching mechanism itself is correct**: at `neg_cache_interval=1` (recompute every call, i.e. the
+no-caching case), output matched the real baseline sampler exactly (`rel_error=0.000000`,
+`neg_reuse=0` confirmed) -- rules out a bug in the diff-cache logic itself.
+
+**At `neg_cache_interval=2` (the same default the original TRELLIS project found a real, usable
+1.17x-1.30x speedup at), the result here is a real speedup with unacceptably large quality drift:**
+- `sparse_structure`: **1.187x** speedup, but **rel_error=0.44** on the raw model prediction
+  (voxel-count proxy only shifted -0.83%, so the drift is concentrated in prediction detail, not
+  gross occupancy).
+- `shape_slat`: **1.261x** speedup, **rel_error=0.45** on the predicted SLat features.
+
+Both errors are roughly **40x larger** than what would read as acceptable (the original project's
+working fix kept drift small enough that mesh vertex counts stayed stable across 6 combinations).
+This is a real negative result, not a bug to chase further before reporting it.
+
+**Root-cause hypothesis, not yet independently isolated** (two confounded differences from the
+original project's setting, both plausible contributors per AB-Cache's own published finding that
+higher `cfg_strength` amplifies staleness error):
+1. TRELLIS.2's real production config uses **`guidance_strength=7.5`** vs. the original project's
+   `cfg_strength=5.0` (in the original's convention, `guidance_strength = 1 + cfg_strength`, so
+   this is 7.5 vs. 6.0 on a like-for-like basis -- still meaningfully higher).
+2. TRELLIS.2's real production config uses only **`steps=12`** total, with `guidance_interval=
+   [0.6, 1.0]` covering roughly 9-10 of those 12 steps (`neg_recompute + neg_reuse` = 10 for
+   sparse_structure, 9 for shape_slat, confirmed by the script's own counters). The original
+   project's sampler runs 25-50 steps by default. Caching every other step out of a 9-10-step CFG
+   window is a much larger fraction of the total schedule than the same absolute interval would be
+   over 25-50 steps -- each skipped recompute buys less total speedup *and* costs more relative
+   accuracy, since there's far less schedule left to average the error back out.
+
+**Conclusion: do not use `DiffCachedCfgFlowEulerGuidanceIntervalSampler` at `neg_cache_interval=2`
+(or ship it as a claimed speedup) on TRELLIS.2's real 12-step config as of this writing.** The file
+stays in the tree (this project's non-destructive versioning convention) with this finding, not
+deleted -- the mechanism is correct and may be useful if TRELLIS.2 is later run at a higher step
+count, or with a smaller/adaptive interval (AB-Cache's actual error-gated trigger, still on this
+project's open list, is the more promising next step over a fixed interval given this result).
+**Only single-image/single-seed tested here** -- weaker rigor than the original project's
+6-combination check; that gap doesn't change the conclusion (the error margin is too large to be
+seed/image noise) but is worth closing before fully retiring the idea.
+
+This *is* still real, novel work -- as far as this project can tell, nobody else has applied or
+benchmarked CFG difference-caching against TRELLIS.2, and a clean negative result with a grounded
+root-cause hypothesis is a legitimate, honestly-reported finding, consistent with how the original
+project treated its own kernel ceilings.
