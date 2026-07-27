@@ -22,6 +22,12 @@ MODEL_REVISIONS = {
 # Exact runtime files for the supported image-to-3D CLI. Keeping this manifest
 # avoids caching unrelated encoders, legacy checkpoints, and every ONNX/RMBG
 # weight variant while still supporting 512, 1024, and 1024_cascade offline.
+#
+# The two `*_enc_*` entries below are the exception: they're not needed by the
+# inference CLI (which only ever decodes), but are needed by data_toolkit's
+# encode_shape_latent.py/encode_ss_latent.py (dataset-preparation latent
+# encoding, MDT_DIST_PLAN.md Phase 0) -- kept in this same manifest rather than
+# a separate one so download_weights.py/--offline still covers them.
 MODEL_FILES = {
     TRELLIS_REPO: (
         "pipeline.json",
@@ -29,6 +35,8 @@ MODEL_FILES = {
         "ckpts/ss_flow_img_dit_1_3B_64_bf16.safetensors",
         "ckpts/shape_dec_next_dc_f16c32_fp16.json",
         "ckpts/shape_dec_next_dc_f16c32_fp16.safetensors",
+        "ckpts/shape_enc_next_dc_f16c32_fp16.json",
+        "ckpts/shape_enc_next_dc_f16c32_fp16.safetensors",
         "ckpts/slat_flow_img2shape_dit_1_3B_512_bf16.json",
         "ckpts/slat_flow_img2shape_dit_1_3B_512_bf16.safetensors",
         "ckpts/slat_flow_img2shape_dit_1_3B_1024_bf16.json",
@@ -43,6 +51,8 @@ MODEL_FILES = {
     TRELLIS_IMAGE_LARGE_REPO: (
         "ckpts/ss_dec_conv3d_16l8_fp16.json",
         "ckpts/ss_dec_conv3d_16l8_fp16.safetensors",
+        "ckpts/ss_enc_conv3d_16l8_fp16.json",
+        "ckpts/ss_enc_conv3d_16l8_fp16.safetensors",
     ),
     DINOV3_REPO: (
         "config.json",

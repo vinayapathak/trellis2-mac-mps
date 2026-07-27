@@ -15,12 +15,19 @@ import trellis2.models as models
 
 torch.set_grad_enabled(False)
 
+# Not written upstream -- same MPS port as encode_shape_latent.py, see its DEVICE comment.
+DEVICE = torch.device('mps') if torch.backends.mps.is_available() else torch.device('cuda')
+
 def is_valid_sparse_tensor(tensor):
     return torch.isfinite(tensor.feats).all() and torch.isfinite(tensor.coords).all()
 
 def clear_cuda_error():
-    torch.cuda.synchronize()
-    torch.cuda.empty_cache()
+    if DEVICE.type == 'mps':
+        torch.mps.synchronize()
+        torch.mps.empty_cache()
+    else:
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -55,11 +62,13 @@ if __name__ == '__main__':
 
     if opt.enc_model is None:
         latent_name = f'{opt.enc_pretrained.split("/")[-1]}_{opt.resolution}'
-        encoder = models.from_pretrained(opt.enc_pretrained).eval().cuda()
+        encoder = models.from_pretrained(
+            opt.enc_pretrained, cache_dir=os.path.expanduser('~/.cache/trellis2/huggingface')
+        ).eval().to(DEVICE)
     else:
         latent_name = f'{opt.enc_model.split("/")[-1]}_{opt.ckpt}_{opt.resolution}'
         cfg = edict(json.load(open(os.path.join(opt.model_root, opt.enc_model, 'config.json'), 'r')))
-        encoder = getattr(models, cfg.models.encoder.name)(**cfg.models.encoder.args).cuda()
+        encoder = getattr(models, cfg.models.encoder.name)(**cfg.models.encoder.args).to(DEVICE)
         ckpt_path = os.path.join(opt.model_root, opt.enc_model, 'ckpts', f'encoder_{opt.ckpt}.pt')
         encoder.load_state_dict(torch.load(ckpt_path), strict=False)
         encoder.eval()
@@ -138,9 +147,12 @@ if __name__ == '__main__':
                     print(f"[Skip] {sha256}: Failed to load input")
                     continue
                 
-                ss = ss.cuda()[None].float()
+                ss = ss.to(DEVICE)[None].float()
                 z = encoder(ss, sample_posterior=False)
-                torch.cuda.synchronize()
+                if DEVICE.type == 'mps':
+                    torch.mps.synchronize()
+                else:
+                    torch.cuda.synchronize()
 
                 if not torch.isfinite(z).all():
                     print(f"[Skip] {sha256}: Non-finite latent")

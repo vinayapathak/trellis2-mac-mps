@@ -17,12 +17,23 @@ import trellis2.modules.sparse as sp
 
 torch.set_grad_enabled(False)
 
+# Not written upstream -- TRELLIS.2's own encode_shape_latent.py hardcodes .cuda() throughout
+# (no CUDA on Apple Silicon). DEVICE/clear_device_error() follow this project's established
+# MPS-port convention (trellis2/backends.py's HAS_MPS flag, torch.mps.synchronize()/
+# empty_cache() -- see trellis2/pipelines/trellis2_image_to_3d.py and trellis2/modules/
+# sparse/config.py for the same pattern).
+DEVICE = torch.device('mps') if torch.backends.mps.is_available() else torch.device('cuda')
+
 def is_valid_sparse_tensor(tensor):
     return torch.isfinite(tensor.feats).all() and torch.isfinite(tensor.coords).all()
 
 def clear_cuda_error():
-    torch.cuda.synchronize()
-    torch.cuda.empty_cache()
+    if DEVICE.type == 'mps':
+        torch.mps.synchronize()
+        torch.mps.empty_cache()
+    else:
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -55,11 +66,13 @@ if __name__ == '__main__':
 
     if opt.enc_model is None:
         latent_name = f'{opt.enc_pretrained.split("/")[-1]}_{opt.resolution}'
-        encoder = models.from_pretrained(opt.enc_pretrained).eval().cuda()
+        encoder = models.from_pretrained(
+            opt.enc_pretrained, cache_dir=os.path.expanduser('~/.cache/trellis2/huggingface')
+        ).eval().to(DEVICE)
     else:
         latent_name = f'{opt.enc_model.split("/")[-1]}_{opt.ckpt}_{opt.resolution}'
         cfg = edict(json.load(open(os.path.join(opt.model_root, opt.enc_model, 'config.json'), 'r')))
-        encoder = getattr(models, cfg.models.encoder.name)(**cfg.models.encoder.args).cuda()
+        encoder = getattr(models, cfg.models.encoder.name)(**cfg.models.encoder.args).to(DEVICE)
         ckpt_path = os.path.join(opt.model_root, opt.enc_model, 'ckpts', f'encoder_{opt.ckpt}.pt')
         encoder.load_state_dict(torch.load(ckpt_path), strict=False)
         encoder.eval()
@@ -159,8 +172,11 @@ if __name__ == '__main__':
                     print(f"[Skip] {sha256}: NaN/Inf in input")
                     continue
 
-                z = encoder(vertices.cuda(), intersected.cuda())
-                torch.cuda.synchronize()
+                z = encoder(vertices.to(DEVICE), intersected.to(DEVICE))
+                if DEVICE.type == 'mps':
+                    torch.mps.synchronize()
+                else:
+                    torch.cuda.synchronize()
 
                 if not torch.isfinite(z.feats).all():
                     print(f"[Skip] {sha256}: Non-finite latent in z.feats")
