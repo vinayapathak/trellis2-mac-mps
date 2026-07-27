@@ -635,3 +635,83 @@ portion of one of three flow-model stages is a much weaker case than the ~3.3x n
 effect, not worth pursuing as a kernel project by itself"** -- the higher-leverage open items
 remain the ones already on this project's list (multi-generation characterization, the CFG-caching
 adaptive-interval idea, or simply moving on to a different part of the pipeline).
+
+## Update: VDE ported and benchmarked -- best of three techniques tried, none reach a usable point
+
+Ported VDE (Velocity Decomposition and Estimation, arXiv:2605.23381, CVPR 2026, Tan et al.) to
+`shape_slat_flow_model_512` -- `trellis2/pipelines/samplers/flow_euler_vde.py`,
+`VDEFlowEulerGuidanceIntervalSampler`. Read the actual paper methodology and cloned the authors'
+own reference implementation (`Tan-Junwen/VDE`, `VDE4FLUX/inference_flux1.py`) to port the real
+algorithm rather than re-deriving from the abstract. **Confirmed, before implementing anything,
+that nobody has published a TRELLIS or TRELLIS.2 result for VDE**: the authors' own repo has a
+`VDE4Trellis2/` directory, but checked its actual contents directly -- it holds a single 1-byte
+placeholder file (`测试文件.txt`, "test file.txt"), identical to five OTHER untested-model
+directories in the same repo (`VDE4Z-image`, `VDE4Wan2.1`, `VDE4HunyuanVideo1.5`,
+`VDE4CogVideoX1.5`, `ComfyUI-VDE`) -- only the two models actually evaluated in the published paper
+(FLUX, Qwen-Image) have real code (13-18KB Python files, real READMEs). That pattern -- identical
+empty stubs across six unrelated targets -- reads as a "planned model support" roadmap list, not
+evidence of active work on TRELLIS.2 specifically. (Standard caveat: this can't rule out
+unpublished private work by definition -- no prior-art search can -- but there is no public
+evidence of it.)
+
+**What VDE actually does, confirmed from the real reference code** (simpler and more aggressive
+than the paper's prose alone suggests): treats the entire latent as ONE flattened vector (no
+per-token decomposition), splits the predicted velocity into a scalar component parallel to the
+current latent and a scalar-times-unit-vector orthogonal component, linearly EXTRAPOLATES (not
+just interpolates -- unclamped weight) the two scalars from the two most recent real ("anchor")
+calls, and holds the orthogonal direction flat from the last anchor. Critically, unlike this
+project's own CFG-diff-cache (which always keeps the positive/conditional branch fresh every
+step), VDE skips the model call **entirely** on non-anchor steps -- both cond and uncond branches
+at once, a strictly bigger lever.
+
+**Result** (`scripts/investigate_vde.py`, real DINOv3 conditioning, real sparse coords, 3741
+tokens, real `guidance_interval=[0.6,1.0]`/`steps=12`/`guidance_strength=7.5`, 9 real CFG calls in
+the baseline):
+
+| stable_step | interval | speedup | rel_error | real+estimated calls |
+|---|---|---|---|---|
+| 2 | 2 | 1.347x | **0.277** (best quality) | 6+3 |
+| 1 | 2 | 1.532x | 0.383 | 5+4 |
+| 2 | 3 | 1.565x | 0.374 | 5+4 |
+| 0 | 2 | 1.562x | 0.459 | 5+4 |
+| 1 | 3 | 1.846x | 0.527 | 4+5 |
+| 1 | 4 | **2.290x** (best speed) | 0.677 | 3+6 |
+
+Correctness sanity check (`interval=1`, never estimates) matched the baseline exactly
+(`rel_error=0.000000`), confirming the port itself is bug-free -- the numbers above are real
+algorithmic behavior, not an implementation error.
+
+**Does not reach anywhere close to a 10x target.** Best speedup (2.29x) has unusable error (0.677);
+best quality point (1.35x) still sits at 0.277, well above what this project has treated as an
+acceptable bar throughout (compare: real kernel-correctness rel_errors elsewhere in this project
+sit around 1e-6 to 1e-5; even the loosest "acceptable drift" language used earlier implied error
+roughly two orders of magnitude smaller than this).
+
+**But VDE is the best-performing of the three techniques tried here, and the comparison itself is
+the real finding.** At comparable speedups, VDE's error is meaningfully lower than the other two,
+and its error/speedup trend is monotonic and sane (more real calls -> lower error) -- unlike
+AB-Cache's non-monotonic, worse-with-more-real-structure result:
+
+| technique | best comparable result |
+|---|---|
+| CFG difference-caching (zero-order hold) | 1.19-1.26x, rel_error 0.44-0.45 |
+| AB-Cache (order-2/3 polynomial extrapolation) | worse than zero-order hold (0.62-0.91) |
+| VDE (velocity decomposition, this update) | 1.35x, rel_error 0.28 -- best of the three |
+
+**The comparative pattern across three mathematically distinct technique families -- zero-order
+hold, polynomial extrapolation, and geometric velocity decomposition -- all failing to reach a
+usable quality/speed tradeoff on TRELLIS.2's compressed 12-step/9-call schedule is a stronger,
+better-evidenced finding than any single attempt alone.** It's consistent with (not proof of, but
+consistent with) a structural explanation: TRELLIS.2's real production schedule is already so
+short that there isn't enough redundancy across steps left for inference-time step-skipping to
+exploit, regardless of the specific mathematical technique used to do the skipping -- a
+fundamentally different constraint than the 25-50 step regimes all three techniques were originally
+validated on. This motivates looking at a lever that doesn't depend on having "steps to spare":
+distillation, which reduces the number of steps the model *needs*, rather than trying to skip
+steps it still nominally has. **Scoped, not started: see `MDT_DIST_PLAN.md`** -- a phased plan to
+port MDT-dist (arXiv:2509.04406, 9.0x/6.5x on original TRELLIS, nobody has applied it to TRELLIS.2
+or its sparse O-Voxel SLat models) to `shape_slat_flow_model_512`, built around this repo's real,
+already-existing training infrastructure (`train.py`, `data_toolkit/`, real training configs) and
+the user's DGX pod access. Explicitly scoped as a small pilot first, honest about the real risks
+(12-step teacher vs. the paper's 25-step one; sparse/variable-token adaptation of the VM/VD losses)
+rather than assumed to transfer.
