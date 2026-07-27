@@ -89,6 +89,7 @@ from easydict import EasyDict as edict
 
 from ... import models
 from ...modules import sparse as sp
+from .mixins.classifier_free_guidance import ClassifierFreeGuidanceMixin
 from .sparse_flow_matching import ImageConditionedSparseFlowMatchingCFGTrainer
 
 
@@ -310,10 +311,20 @@ class SCFMDistillTrainer(ImageConditionedSparseFlowMatchingCFGTrainer):
         SCFM's Eq (13) loss, adapted for SparseTensor.feats. See module docstring for the full
         derivation; NOT yet run through Phase 2 verification.
         """
-        assert neg_cond is not None, "neg_cond is required to build CFG-conditioned SCFM targets"
         B = x_0.shape[0]
         device = x_0.device
         noise = x_0.replace(torch.randn_like(x_0.feats))
+
+        # Encode the conditioning image ONCE and reuse the resulting features for both branches
+        # below -- a real bug caught by Phase 2's synthetic check: `ImageConditionedMixin.get_cond`
+        # re-encodes raw images via DINOv3 every time it's called, so calling it only for the
+        # student branch (as an earlier draft of this method did) left the teacher/stopgrad branch
+        # being fed *raw, un-encoded images* through `_cfg_velocity`, which expects encoded
+        # [B, N, cond_channels] features. `neg_cond` is all-zeros, matching
+        # `ImageConditionedMixin.get_cond`'s own established convention (not a separately encoded
+        # "blank image").
+        cond_feat = self.encode_image(cond)
+        neg_cond_feat = torch.zeros_like(cond_feat)
 
         t1_np, t2_np, t3_np, teacher_idx, self_idx = self._sample_windows(B)
         t1 = torch.tensor(t1_np, device=device, dtype=torch.float32)
@@ -323,8 +334,19 @@ class SCFMDistillTrainer(ImageConditionedSparseFlowMatchingCFGTrainer):
         x_t1 = self.diffuse(x_0, t1, noise=noise)
         x_t2 = self.diffuse(x_0, t2, noise=noise)
 
-        # Student prediction -- the only branch that needs gradients.
-        cond_train = self.get_cond(cond, neg_cond=neg_cond, **kwargs)
+        # Student prediction -- the only branch that needs gradients. A single plain forward pass
+        # (no CFG averaging), matching Algorithm 1 step 9 ("perform *a* forward pass") -- the
+        # paper's own text only requires the CFG-conditioned formulation for the *targets* inside
+        # Eq (12), not the student's own raw prediction being regressed toward them.
+        #
+        # Still applies this project's existing p_uncond training-time dropout (via
+        # ClassifierFreeGuidanceMixin.get_cond, reached directly to skip ImageConditionedMixin's
+        # re-encoding step) so the distilled student retains CFG capability at inference, matching
+        # how shape_slat_flow_model_512 itself was originally trained (p_uncond=0.1) and how the
+        # real production sampler actually calls it (guidance_strength=7.5) -- not covered
+        # explicitly by the paper (Flux/SD3.5's own CFG handling differs, see module docstring),
+        # a deliberate, documented adaptation rather than a silent gap.
+        cond_train = ClassifierFreeGuidanceMixin.get_cond(self, cond_feat, neg_cond=neg_cond_feat, **kwargs)
         pred_v1 = self.training_models['denoiser'](x_t1, t1 * 1000, cond_train, **kwargs)
         assert pred_v1.shape == x_0.shape
 
@@ -344,8 +366,8 @@ class SCFMDistillTrainer(ImageConditionedSparseFlowMatchingCFGTrainer):
                 sub_x_t2 = x_t2[idxs]
                 sub_t1 = t1[idxs]
                 sub_t2 = t2[idxs]
-                sub_cond = _select_cond(cond, idxs)
-                sub_neg_cond = _select_cond(neg_cond, idxs)
+                sub_cond = _select_cond(cond_feat, idxs)
+                sub_neg_cond = _select_cond(neg_cond_feat, idxs)
 
                 v1 = self._cfg_velocity(model, sub_x_t1, sub_t1, sub_cond, sub_neg_cond, **kwargs)
                 v2 = self._cfg_velocity(model, sub_x_t2, sub_t2, sub_cond, sub_neg_cond, **kwargs)
