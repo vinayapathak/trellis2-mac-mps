@@ -278,13 +278,46 @@ Also fixed a real, separate gap found while sanity-checking that the new file ev
 listed in `requirements_macos_core.txt` — nothing had exercised the training path on macOS until
 this phase. Added, pinned to the installed version.
 
-Verified only at the "imports cleanly, class MRO resolves, shift-grid formula is numerically
-correct" level so far — real correctness verification (gradient flow, finite loss, a real
-forward+backward pass on Phase 0's real encoded pilot data) is Phase 2, deliberately not done yet.
-
 ### Phase 2 — correctness verification (this project's established methodology)
-- Synthetic check: gradient flow to every trainable parameter, finite loss, no NaNs.
-- Real-data check: one real forward+backward pass on Phase 0's real encoded data.
+
+**Status: complete.** `scripts/verify_scfm_distill.py` (heavy -- loads the real ~1.3B-param
+teacher/student/stopgrad and real DINOv3, so kept out of `tests/`'s fast pytest suite).
+
+- ✅ **Synthetic check**: a random `SparseTensor` batch through the real model architecture and
+  real pretrained weights (not a toy config). Finite loss, gradient flow to all 640 trainable
+  student parameter tensors, zero non-finite gradients, teacher/stopgrad correctly frozen (0
+  gradients each).
+- ✅ **Real-data check**: Phase 0's real resolution-512 shape latents
+  (`shape_enc_next_dc_f16c32_fp16_512`) plus this project's real example conditioning image
+  (`assets/example_image/T.png`, used in prior real generation runs), through the real DINOv3
+  path. Verified separately for **both** the teacher-guided branch (`k_over_n=1.0`) and the
+  self-distill/stopgrad branch (`k_over_n=0.0`) — a single real object's `k/N` split at the
+  paper's default 0.4 ratio only exercises one branch, so both were forced explicitly rather than
+  leaving one silently untested.
+
+**Two real bugs found and fixed by this verification** (this is exactly what Phase 2 is for —
+Phase 1's own "imports cleanly" check could not have caught either):
+1. `ImageConditionedMixin.get_cond` re-encodes raw images via DINOv3 on every call. The original
+   `training_losses` called it only for the student's own forward pass, leaving the teacher/
+   stopgrad branch fed **raw, un-encoded images** through `_cfg_velocity` (which expects encoded
+   `[B,N,cond_channels]` features) — would have silently produced garbage targets, not an error,
+   had the synthetic check's stub not surfaced the missing encoding step first. Fixed by encoding
+   `cond`/`neg_cond` once up front and reusing those features in both branches; the student branch
+   now reaches `ClassifierFreeGuidanceMixin.get_cond` directly (skipping the image-specific
+   re-encoding), applying the same `p_uncond=0.1` training-time dropout
+   `shape_slat_flow_model_512` was itself trained with, so the distilled student keeps CFG
+   capability at inference — a deliberate adaptation the paper doesn't cover explicitly (see
+   Phase 1 notes on Flux/SD3.5's differing CFG handling), not a silent gap.
+2. `trellis2/trainers/flow_matching/mixins/image_conditioned.py` had its own local copy of
+   `DinoV2FeatureExtractor`/`DinoV3FeatureExtractor` with hardcoded `.cuda()` throughout — never
+   exercised on this Mac since nothing had run training before Phase 1.
+   `trellis2/modules/image_feature_extractor.py` already has a proper device-tracked version of
+   the exact same classes, used successfully by the real, working inference pipeline — replaced
+   the drifting local copy with an import of that module instead of patching two parallel
+   implementations.
+
+Real result: **finite loss, full gradient flow, zero NaNs, on real encoded data with a real
+conditioning image, for both loss branches.** Ready for Phase 3 (small-scale DGX pilot).
 
 ### Phase 3 — small-scale pilot training on the DGX pod
 - Explicitly a **feasibility/correctness pilot**: reduced batch (gradient accumulation or a
