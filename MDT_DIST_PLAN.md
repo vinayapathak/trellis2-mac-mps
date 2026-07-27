@@ -111,13 +111,45 @@ Checked directly, not assumed:
 ## Phased plan
 
 ### Phase 0 — data pipeline validation (no distillation code yet)
-- Run `data_toolkit/build_metadata.py` + `download.py` for a **small slice** of Objaverse-XL (low
-  hundreds of objects) — enough for a real pilot, not a full reproduction.
-- Run the encode pipeline (`encode_shape_latent.py`, `encode_ss_latent.py`) end to end on that
-  slice, confirm the output SLat encodings are shaped/typed correctly for
-  `shape_slat_flow_model_512`'s real training config.
-- Exit criterion: a real, small, correctly-encoded training set exists on disk, verified — not
-  assumed to work because the tooling exists.
+
+**Status: partially complete.** Metadata, download, and mesh-dump stages verified working on a
+real 196-object ObjaverseXL(sketchfab) pilot slice at `/tmp/pilot_test`. PBR dump, O-Voxel
+conversion, and latent encoding not yet attempted.
+
+Real, unplanned finding along the way: this repo's `data_toolkit/` (and the identical upstream
+microsoft/TRELLIS.2 repo, confirmed via GitHub API) documents a `datasets.<SUBSET>` plugin
+interface (`build_metadata.py`/`download.py`/`dump_mesh.py`/`dump_pbr.py` all depend on it) but
+never ships the actual per-dataset connector modules — they only exist in microsoft/TRELLIS v1's
+`dataset_toolkits/datasets/`. Not a local-checkout issue; a real gap in Microsoft's own public
+release.
+
+Concrete progress, in order:
+- ✅ Ported `data_toolkit/datasets/ObjaverseXL.py` from v1 (attributed), fixed a real interface
+  mismatch (v1's `download()` used a kwarg named `output_dir`; TRELLIS.2's `download.py` calls it
+  via `**opt` with key `download_root`).
+- ✅ Metadata fetch: real, works immediately (168,307 real ObjaverseXL-sketchfab records via a
+  public HF CSV).
+- ✅ Download: real, works, with real friction — `objaverse.xl`'s underlying downloader hit five
+  separate transient network `IncompleteRead` interruptions fetching a 196-object slice (not a
+  bug; real network flakiness on large sequential downloads). Recovered by reconstructing the
+  sha256/local_path mapping directly from files already on disk (Sketchfab's on-disk filenames are
+  its own object UIDs, extractable from `metadata.csv`'s `file_identifier` URLs) rather than
+  continuing to retry a fresh full run each time. 196/210 objects, 0 mismatches.
+- ✅ Mesh dump: found and fixed two more real bugs before this worked. (1) `dump_mesh.py`/
+  `dump_pbr.py` hardcode a **Linux-only** Blender fetch (`apt-get` + a Linux tarball), unmodified
+  from upstream — fixed to detect macOS and use the real, already-installed `/Applications/
+  Blender.app` instead. (2) The ported `foreach_instance()` called `func(file, sha256)` (matching
+  v1's own convention), but TRELLIS.2's own `_dump_mesh`/`_dump_pbr` (not written by this project)
+  both do `metadatum['sha256']` — expecting the *full row dict*, not the bare string. First real
+  run failed on all 196/196 objects with `TypeError: string indices must be integers, not 'str'`
+  before this was found and fixed. Real result after both fixes: 196/196 real `.pickle` mesh dumps
+  produced, ~18s total, exit code 0.
+- ⬜ PBR dump, O-Voxel conversion (`dual_grid.py`/`voxelize_pbr.py`), latent encoding
+  (`encode_shape_latent.py`/`encode_ss_latent.py`) — not yet attempted. Each is a real, separate
+  unknown (own external requirements, own possible interface gaps against the same
+  never-shipped-connector pattern already found twice) — do not assume they'll "just work" either.
+- Exit criterion (still not met): a real, small, correctly-encoded training set on disk, shaped/
+  typed correctly for `shape_slat_flow_model_512`'s real training config.
 
 ### Phase 1 — implement SCFM's loss first (cheaper, and no reference code to lean on means doing this carefully matters more)
 - New file: `trellis2/trainers/flow_matching/scfm_distill.py`. Teacher = frozen pretrained
