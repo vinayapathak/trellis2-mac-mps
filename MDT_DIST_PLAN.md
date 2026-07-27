@@ -112,9 +112,9 @@ Checked directly, not assumed:
 
 ### Phase 0 — data pipeline validation (no distillation code yet)
 
-**Status: partially complete.** Metadata, download, and mesh-dump stages verified working on a
-real 196-object ObjaverseXL(sketchfab) pilot slice at `/tmp/pilot_test`. PBR dump, O-Voxel
-conversion, and latent encoding not yet attempted.
+**Status: partially complete.** Metadata, download, mesh-dump, and PBR-dump stages verified working
+on a real 196-object ObjaverseXL(sketchfab) pilot slice at `/tmp/pilot_test`. O-Voxel conversion and
+latent encoding not yet attempted.
 
 Real, unplanned finding along the way: this repo's `data_toolkit/` (and the identical upstream
 microsoft/TRELLIS.2 repo, confirmed via GitHub API) documents a `datasets.<SUBSET>` plugin
@@ -144,10 +144,23 @@ Concrete progress, in order:
   run failed on all 196/196 objects with `TypeError: string indices must be integers, not 'str'`
   before this was found and fixed. Real result after both fixes: 196/196 real `.pickle` mesh dumps
   produced, ~18s total, exit code 0.
-- ⬜ PBR dump, O-Voxel conversion (`dual_grid.py`/`voxelize_pbr.py`), latent encoding
+- ✅ PBR dump: found and fixed a third real bug. `install_pillow.py`'s pip install falls back to a
+  user-site install on macOS (Blender.app's bundled site-packages isn't writable) —
+  `~/.local/lib/python3.13/site-packages`. Pip itself reported "Requirement already satisfied,"
+  yet `blender -b -P dump_pbr.py` still raised `ModuleNotFoundError: No module named 'PIL'`.
+  Setting `PYTHONPATH` in the subprocess environment did **not** fix it — confirmed directly that
+  Blender's embedded Python ignores `PYTHONPATH`. Real fix: inject the path via `sys.path` from
+  *inside* the Blender-side script itself, before the `PIL` import. Real result: **168/196 (86%)**
+  succeeded, exit code 0. The 28 failures are genuine, expected content limitations, not a bug —
+  error messages list unsupported Blender shader-node combinations (`Emission`, `Transparent BSDF`,
+  `Mix Shader`, `Color Attribute`) this baking pipeline doesn't handle; real-world 3D assets have
+  material complexity this toolkit's PBR extraction wasn't built to cover. Not chased further —
+  86% is a solid, real pilot yield, not a target to push to 100%.
+- ⬜ O-Voxel conversion (`dual_grid.py`/`voxelize_pbr.py`), latent encoding
   (`encode_shape_latent.py`/`encode_ss_latent.py`) — not yet attempted. Each is a real, separate
   unknown (own external requirements, own possible interface gaps against the same
-  never-shipped-connector pattern already found twice) — do not assume they'll "just work" either.
+  never-shipped-connector pattern already found three times) — do not assume they'll "just work"
+  either.
 - Exit criterion (still not met): a real, small, correctly-encoded training set on disk, shaped/
   typed correctly for `shape_slat_flow_model_512`'s real training config.
 
