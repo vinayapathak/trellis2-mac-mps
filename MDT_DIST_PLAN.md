@@ -112,9 +112,10 @@ Checked directly, not assumed:
 
 ### Phase 0 — data pipeline validation (no distillation code yet)
 
-**Status: partially complete.** Metadata, download, mesh-dump, PBR-dump, and O-Voxel-conversion
-stages verified working on a real 196-object ObjaverseXL(sketchfab) pilot slice at
-`/tmp/pilot_test`. Latent encoding not yet attempted.
+**Status: all stages verified working at pilot scale; one real scope caveat before calling this
+fully done (see below).** Metadata, download, mesh-dump, PBR-dump, O-Voxel-conversion, and
+latent-encoding stages all verified working on a real 196-object ObjaverseXL(sketchfab) pilot
+slice at `/tmp/pilot_test`.
 
 Real, unplanned finding along the way: this repo's `data_toolkit/` (and the identical upstream
 microsoft/TRELLIS.2 repo, confirmed via GitHub API) documents a `datasets.<SUBSET>` plugin
@@ -186,11 +187,34 @@ Concrete progress, in order:
   file — the ported v1 `foreach_instance` had no such mode). Real result once everything built:
   **196/196** dual-grid conversions (resolution 64) and **168/168** PBR voxelizations (resolution
   64, i.e. all PBR-dumped objects), both exit code 0, zero errors.
-- ⬜ Latent encoding (`encode_shape_latent.py`/`encode_ss_latent.py`) — not yet attempted. Same
-  caution as before: a real, separate unknown, own external requirements, own possible interface
-  gaps against the same never-shipped-connector pattern — do not assume it'll "just work" either.
-- Exit criterion (still not met): a real, small, correctly-encoded training set on disk, shaped/
-  typed correctly for `shape_slat_flow_model_512`'s real training config.
+- ✅ Latent encoding (`encode_shape_latent.py`/`encode_ss_latent.py`): the real, separate unknown
+  this time was device code, not the connector-plugin pattern — both scripts (unmodified from
+  upstream) hardcode `.cuda()`/`torch.cuda.synchronize()`/`torch.cuda.empty_cache()` throughout.
+  Ported to this project's established MPS convention (`trellis2/backends.py`'s `HAS_MPS`
+  pattern, `torch.mps.synchronize()`/`empty_cache()`, already used elsewhere in this repo) via a
+  `DEVICE` module constant, falling back to real CUDA if ever run on a CUDA machine. Also needed
+  two encoder checkpoints neither present locally nor in `trellis2/model_revisions.py`'s
+  `MODEL_FILES` manifest — `ss_enc_conv3d_16l8_fp16` (`microsoft/TRELLIS-image-large`) and
+  `shape_enc_next_dc_f16c32_fp16` (`microsoft/TRELLIS.2-4B`), neither needed by the inference CLI
+  (decode-only). Confirmed both real via the HF API before downloading (119MB/709MB), added to
+  the manifest at the user's explicit direction so `download_weights.py --offline` keeps covering
+  them. Real result: single-instance sanity test then full-batch, both scripts, both **196/196**,
+  zero errors — real, finite output (shape latent: `feats` `[N,32]` float32, `coords` `[N,3]`
+  uint8; ss latent: `z` `[8,16,16,16]` float32).
+  **Real scope caveat, not a bug:** verified the channel dimension matches
+  `slat_flow_img2shape_dit_1_3B_512`'s real training config exactly (`in_channels: 32` ==
+  our shape-latent `feats` width), confirming correct encoder/model pairing — but that config's
+  `resolution: 32` corresponds to a real *512*-resolution dual-grid input (512/16=32), while this
+  pilot used dual-grid resolution 64 for speed (shape-latent coords range `[0,3]`, not `[0,31]`).
+  Pipeline mechanics and shape/dtype correctness are verified end to end; the literal target
+  resolution (512) has not been run yet — that's a heavier, separate, deliberate step, not
+  something this pilot skipped by mistake.
+- Exit criterion: **mechanically met at pilot scale** — a real, small, correctly-encoded training
+  set exists on disk (196 objects, shape latents + ss latents, channel dimension verified against
+  `shape_slat_flow_model_512`'s real training config). **Not yet met at production scale** — the
+  pilot's dual-grid resolution (64) doesn't match the config's implied 512 input resolution; a
+  real run at resolution 512 (heavier compute, not yet attempted) is needed before treating this
+  as fully closed.
 
 ### Phase 1 — implement SCFM's loss first (cheaper, and no reference code to lean on means doing this carefully matters more)
 - New file: `trellis2/trainers/flow_matching/scfm_distill.py`. Teacher = frozen pretrained
