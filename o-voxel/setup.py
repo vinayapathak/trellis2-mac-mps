@@ -19,6 +19,7 @@ if BUILD_TARGET == "cpu" or (BUILD_TARGET == "auto" and platform.system() == "Da
         "src/io/svo.cpp",
         "src/io/filter_parent.cpp",
         "src/io/filter_neighbor.cpp",
+        "src/serialize/serialize_cpu.cpp",
         "src/ext_cpu.cpp",
     ]
     # Only build if the CPU ext entry point exists

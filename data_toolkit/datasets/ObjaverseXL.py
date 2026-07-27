@@ -62,13 +62,19 @@ def download(metadata, download_root, **kwargs):
 # `metadatum['sha256']`, i.e. they expect the full row dict as the second positional arg, not just
 # the string. Confirmed by the real crash this produced on the first real run ("string indices must
 # be integers, not 'str'" -- metadatum['sha256'] applied to a bare sha256 string) before fixing.
-def foreach_instance(metadata, output_dir, func, max_workers=None, desc='Processing objects') -> pd.DataFrame:
+# `no_file`: TRELLIS.2's own dual_grid.py/voxelize_pbr.py (not written by this project) call
+# foreach_instance(metadata, None, func, ..., no_file=True, ...) -- these stages read from
+# mesh_dumps/pbr_dumps directly (by sha256), not from the raw downloaded file, so there's no
+# `local_path`/`output_dir` file to resolve at all. Their own _dual_grid_mesh/_pbr_voxelize both
+# take `file` as an unused first positional param. v1's reference foreach_instance (this function
+# was ported from) has no such mode -- added to match TRELLIS.2's real call sites.
+def foreach_instance(metadata, output_dir, func, max_workers=None, desc='Processing objects', no_file=False) -> pd.DataFrame:
     import os
     from concurrent.futures import ThreadPoolExecutor
     from tqdm import tqdm
     import tempfile
     import zipfile
-    
+
     # load metadata
     metadata = metadata.to_dict('records')
 
@@ -80,6 +86,12 @@ def foreach_instance(metadata, output_dir, func, max_workers=None, desc='Process
             tqdm(total=len(metadata), desc=desc) as pbar:
             def worker(metadatum):
                 try:
+                    if no_file:
+                        record = func(None, metadatum)
+                        if record is not None:
+                            records.append(record)
+                        pbar.update()
+                        return
                     local_path = metadatum['local_path']
                     sha256 = metadatum['sha256']
                     if local_path.startswith('raw/github/repos/'):
