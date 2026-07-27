@@ -112,10 +112,11 @@ Checked directly, not assumed:
 
 ### Phase 0 — data pipeline validation (no distillation code yet)
 
-**Status: all stages verified working at pilot scale; one real scope caveat before calling this
-fully done (see below).** Metadata, download, mesh-dump, PBR-dump, O-Voxel-conversion, and
-latent-encoding stages all verified working on a real 196-object ObjaverseXL(sketchfab) pilot
-slice at `/tmp/pilot_test`.
+**Status: complete, including at the real production resolution (512).** Metadata, download,
+mesh-dump, PBR-dump, O-Voxel-conversion, and latent-encoding stages all verified working on a
+real 196-object ObjaverseXL(sketchfab) pilot slice at `/tmp/pilot_test`, first at a fast
+resolution-64 pilot pass and then re-run in full at resolution 512 (the actual resolution
+`slat_flow_img2shape_dit_1_3B_512` expects) to close the scope gap flagged after the first pass.
 
 Real, unplanned finding along the way: this repo's `data_toolkit/` (and the identical upstream
 microsoft/TRELLIS.2 repo, confirmed via GitHub API) documents a `datasets.<SUBSET>` plugin
@@ -201,20 +202,37 @@ Concrete progress, in order:
   them. Real result: single-instance sanity test then full-batch, both scripts, both **196/196**,
   zero errors — real, finite output (shape latent: `feats` `[N,32]` float32, `coords` `[N,3]`
   uint8; ss latent: `z` `[8,16,16,16]` float32).
-  **Real scope caveat, not a bug:** verified the channel dimension matches
-  `slat_flow_img2shape_dit_1_3B_512`'s real training config exactly (`in_channels: 32` ==
-  our shape-latent `feats` width), confirming correct encoder/model pairing — but that config's
-  `resolution: 32` corresponds to a real *512*-resolution dual-grid input (512/16=32), while this
-  pilot used dual-grid resolution 64 for speed (shape-latent coords range `[0,3]`, not `[0,31]`).
-  Pipeline mechanics and shape/dtype correctness are verified end to end; the literal target
-  resolution (512) has not been run yet — that's a heavier, separate, deliberate step, not
-  something this pilot skipped by mistake.
-- Exit criterion: **mechanically met at pilot scale** — a real, small, correctly-encoded training
-  set exists on disk (196 objects, shape latents + ss latents, channel dimension verified against
-  `shape_slat_flow_model_512`'s real training config). **Not yet met at production scale** — the
-  pilot's dual-grid resolution (64) doesn't match the config's implied 512 input resolution; a
-  real run at resolution 512 (heavier compute, not yet attempted) is needed before treating this
-  as fully closed.
+  Verified the channel dimension matches `slat_flow_img2shape_dit_1_3B_512`'s real training
+  config exactly (`in_channels: 32` == our shape-latent `feats` width), confirming correct
+  encoder/model pairing — but at this point the pilot had used dual-grid resolution 64 for speed
+  (shape-latent coords range `[0,3]`, not the real `[0,31]` the config's `resolution: 32` implies
+  for a true 512-resolution input) — flagged as a real scope gap, not yet closed.
+- ✅ **Resolution-512 re-run, closing the scope gap above.** Re-ran the full O-Voxel-conversion +
+  latent-encoding chain at the real production resolution: `dual_grid.py --resolution 512`
+  (**196/196**, ~52s), `voxelize_pbr.py --resolution 512` (**168/168**, ~40s),
+  `encode_shape_latent.py --resolution 512` (**196/196**, ~2m9s) — real output file size scales
+  as expected (dual-grid `.vxz`: 17KB → 922KB per object, ~54x, consistent with a finer surface
+  mesh at 8x linear resolution). Shape-latent coords now range **`[0,31]`**, exactly matching the
+  config's `resolution: 32` — the scope gap is closed, confirmed with real data, not just
+  arithmetic. Then `encode_ss_latent.py --shape_latent_name shape_enc_next_dc_f16c32_fp16_512`
+  (**196/196**) — real, finite `z` `[8,16,16,16]` float32 for every object.
+  **Real finding along the way, not a bug:** `encode_ss_latent.py`'s own output path is keyed
+  only by `--resolution` (its fixed sparse-structure grid size, 64) — not by which
+  `--shape_latent_name` fed it. Re-running it against the resolution-512 shape latents therefore
+  silently collided with the earlier resolution-64-derived output in the same
+  `ss_latents/ss_enc_conv3d_16l8_fp16_64/` directory, and its own "already processed" check (a
+  plain file-existence scan plus that directory's own stale `metadata.csv`) treated all 196 as
+  already done, so the first re-run attempt processed **0** objects. Not a bug in this project's
+  code — TRELLIS.2's own upstream script has no concept of "regenerate because the input
+  changed." Fixed by moving the stale `.npz` outputs and the stale per-stage `metadata.csv` aside
+  (kept, not deleted, at `ss_latents/ss_enc_conv3d_16l8_fp16_64_from_res64_stale/`) before
+  re-running clean. Worth remembering for any future re-run of this stage against a different
+  shape-latent source at the same `--resolution`.
+- Exit criterion: **fully met, including at production scale.** A real, small,
+  correctly-encoded training set exists on disk (196 objects, shape latents + ss latents at the
+  real resolution-512 scale) — shape/dtype/channel-dimension correctness verified directly
+  against `shape_slat_flow_model_512`'s/`slat_flow_img2shape_dit_1_3B_512`'s real training
+  config, not just asserted.
 
 ### Phase 1 — implement SCFM's loss first (cheaper, and no reference code to lean on means doing this carefully matters more)
 - New file: `trellis2/trainers/flow_matching/scfm_distill.py`. Teacher = frozen pretrained
