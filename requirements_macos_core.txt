@@ -29,5 +29,9 @@ mlx==0.32.0
 psutil==7.2.2
 pytest==9.1.1
 
+# Training (trellis2/trainers/ -- BasicTrainer imports this unconditionally; never added before
+# because nothing had exercised the training path on macOS until MDT_DIST_PLAN.md Phase 1)
+tensorboard==2.21.0
+
 # Upstream renderer utility, pinned instead of following main.
 utils3d @ git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e4021b67b12c460c7057d642626897ec8
