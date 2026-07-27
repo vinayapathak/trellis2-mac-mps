@@ -585,3 +585,53 @@ real kernel investigation (why does SDPA regress here specifically, and can a re
 built around what makes the naive version fast be made both correct at scale and robust, the same
 rigor this project's other kernel work has applied) if pursued further. Not yet pursued past this
 point -- this update stops at "real, verified signal that headroom exists," not a working kernel.
+
+## CORRECTION: the "3.3x" number above does not replicate -- real gap is ~1.3x, not 3.3x
+
+Dug into *why* SDPA regresses (`scripts/investigate_sdpa_regression_root_cause.py`, then
+`scripts/investigate_sdpa_regression_confound_check.py`), and the investigation itself surfaced a
+real problem with the original measurement, not just a root cause for it. Documenting the
+correction openly rather than quietly revising the number, per this project's own established
+convention (same as the AB-Cache mischaracterization correction earlier).
+
+**First pass** (`investigate_sdpa_regression_root_cause.py`, pure synthetic tensors, no model
+loaded, a separate process from the original 3.3x measurement): at the *exact* same shape/dtype
+`(1,12,4096,128)` bf16, clean random tensors showed SDPA losing by only **1.29-1.34x**, not 3.3x.
+The head_dim sweep (fixed seq_len=4096) was also suspicious on its own terms -- non-monotonic,
+noisy spikes to ~3.2x at head_dim=48, 112, 160, 192, 256 while neighboring values (32, 64, 80, 96,
+128) stayed at a modest 0.36x-1.34x, not the smooth trend a real algorithmic cliff would produce.
+
+**Decisive check** (`investigate_sdpa_regression_confound_check.py`): captured the REAL model's
+post-RoPE tensors and, in the exact same process/thermal/memory state, immediately benchmarked (A)
+those real tensors 3x, (B) synthetic random tensors at the identical shape 3x, (C) the real tensors
+shuffled along `head_dim` (destroys structure, keeps the exact marginal value distribution):
+
+| | sdpa/hand ratio |
+|---|---|
+| real tensors, trial 1/2/3 | 1.331x / 1.344x / 1.328x |
+| synthetic tensors, trial 1/2/3 | 1.334x / 1.284x / 1.297x |
+| real tensors, shuffled along head_dim | 1.345x |
+
+**All four converge tightly around ~1.3x.** Real trained-model activations and pure random noise
+give statistically indistinguishable results when measured under identical conditions in the same
+process -- ruling out "the trained model's specific values trigger a slow path" as an explanation
+(also directly confirmed by the value-statistics check: real q has `std=0.14` vs synthetic's
+`std=1.00`, a large, real difference in value scale from RMSNorm, yet it made no measurable
+difference to the ratio). **The original 26.744ms / 3.28x measurement in the prior update does not
+replicate** under repeated, controlled, same-process measurement -- it was very likely a one-off
+measurement artifact in that specific script run (exact mechanism not confirmed -- possible
+candidates: MPSGraph per-tensor-identity graph caching not fully amortized by that script's own
+warmup loop, some transient system state; not chased further since the corrected number is now
+well-established by three independent, consistent measurement approaches).
+
+**Corrected conclusion**: native SDPA is real but *modestly* slower than a naive hand-rolled
+attention on TRELLIS.2's dense `sparse_structure_flow_model` at this shape -- **~1.3x**, not the
+originally reported ~3.3x. Still a real reversal of direction from the original trellis-mac-mps
+project's finding (SDPA winning there by 1.43x), so "do not assume dense-attention conclusions
+transfer" still holds -- but the magnitude of headroom is far smaller than first reported, and
+probably not worth a real kernel-engineering effort on its own (a ~1.3x gap on the attention
+portion of one of three flow-model stages is a much weaker case than the ~3.3x number implied).
+**Downgrading this from "genuinely promising kernel-work candidate" to "confirmed small, real
+effect, not worth pursuing as a kernel project by itself"** -- the higher-leverage open items
+remain the ones already on this project's list (multi-generation characterization, the CFG-caching
+adaptive-interval idea, or simply moving on to a different part of the pipeline).
