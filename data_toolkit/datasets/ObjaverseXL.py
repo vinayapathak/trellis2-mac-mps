@@ -56,6 +56,12 @@ def download(metadata, download_root, **kwargs):
     return pd.DataFrame(downloaded.items(), columns=['sha256', 'local_path'])
 
 
+# NOTE: this differs from the v1 TRELLIS reference (which called `func(file, sha256)`, passing
+# only the bare sha256 string). TRELLIS.2's own call sites -- dump_mesh.py's _dump_mesh(file_path,
+# metadatum, root) and dump_pbr.py's _dump_pbr, neither written by this project -- both do
+# `metadatum['sha256']`, i.e. they expect the full row dict as the second positional arg, not just
+# the string. Confirmed by the real crash this produced on the first real run ("string indices must
+# be integers, not 'str'" -- metadatum['sha256'] applied to a bare sha256 string) before fixing.
 def foreach_instance(metadata, output_dir, func, max_workers=None, desc='Processing objects') -> pd.DataFrame:
     import os
     from concurrent.futures import ThreadPoolExecutor
@@ -84,10 +90,10 @@ def foreach_instance(metadata, output_dir, func, max_workers=None, desc='Process
                             with zipfile.ZipFile(zip_file, 'r') as zip_ref:
                                 zip_ref.extractall(tmp_dir)
                             file = os.path.join(tmp_dir, file_name)
-                            record = func(file, sha256)
+                            record = func(file, metadatum)
                     else:
                         file = os.path.join(output_dir, local_path)
-                        record = func(file, sha256)
+                        record = func(file, metadatum)
                     if record is not None:
                         records.append(record)
                     pbar.update()

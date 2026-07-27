@@ -15,8 +15,23 @@ import tempfile
 BLENDER_LINK = 'https://ftp.halifax.rwth-aachen.de/blender/release/Blender4.5/blender-4.5.1-linux-x64.tar.xz'
 BLENDER_INSTALLATION_PATH = '/tmp'
 BLENDER_PATH = f'{BLENDER_INSTALLATION_PATH}/blender-4.5.1-linux-x64/blender'
+# Same fix as dump_mesh.py -- TRELLIS.2's data_toolkit only ever shipped a Linux-hardcoded Blender
+# fetch (confirmed unmodified from upstream). Use the real, already-installed Blender.app on macOS.
+if sys.platform == 'darwin':
+    _MACOS_BLENDER_APP = os.path.expanduser('/Applications/Blender.app/Contents/MacOS/Blender')
+    if os.path.exists(_MACOS_BLENDER_APP):
+        BLENDER_PATH = _MACOS_BLENDER_APP
 
 def _install_blender():
+    if sys.platform == 'darwin':
+        if not os.path.exists(BLENDER_PATH):
+            raise FileNotFoundError(
+                f'Blender not found at {BLENDER_PATH}. Install Blender.app from '
+                'https://www.blender.org/download/ (or `brew install --cask blender`) -- '
+                'this toolkit\'s automatic installer only supports Linux.'
+            )
+        os.system(f'{BLENDER_PATH} -b --python {os.path.join(os.path.dirname(__file__), "blender_script", "install_pillow.py")}')
+        return
     if not os.path.exists(BLENDER_PATH):
         os.system('sudo apt-get update')
         os.system('sudo apt-get install -y libxrender1 libxi6 libxkbcommon-x11-0 libsm6 libxfixes3 libgl1')
