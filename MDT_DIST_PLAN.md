@@ -235,15 +235,52 @@ Concrete progress, in order:
   config, not just asserted.
 
 ### Phase 1 — implement SCFM's loss first (cheaper, and no reference code to lean on means doing this carefully matters more)
-- New file: `trellis2/trainers/flow_matching/scfm_distill.py`. Teacher = frozen pretrained
-  `shape_slat_flow_model_512`; student = trainable copy initialized from the same weights; maintain
-  an EMA stopgrad copy of the student per the paper's `θ⁻` update rule.
-- Implement the hybrid loss and the windowed-interpolation velocity target, adapted for
-  `SparseTensor.feats` — the real, novel engineering piece, done carefully since there's no
-  reference implementation to check against here (unlike VDE).
-- Reimplement from the equations, cross-check every design decision against the paper's own text
-  rather than guessing at gaps the abstract-level read didn't cover — same discipline used for
-  every other technique ported this session.
+
+**Status: implemented, not yet verified (that's Phase 2).** `trellis2/trainers/flow_matching/
+scfm_distill.py` (`SCFMDistillTrainer`), implementing the paper's vanilla Algorithm 1 (single
+stopgrad EMA — Appendix E's dual fast/slow EMA "final version" is a documented TODO, not silently
+skipped: the paper itself frames it as a training-*speed* optimization with "negligible impact on
+final converged results").
+
+Read the actual PDF directly (downloaded, not a secondary web summary) before writing any code —
+a first WebFetch-based pass materially mis-described what index `i` means in the paper's Eq (13)
+(said it indexed timesteps; the real paper states plainly "`N` is the total batch size," i.e. `i`
+indexes batch elements). Re-reading the real page images caught this before it became a wrong
+implementation — exactly the kind of error this project's "read the actual source, don't guess"
+discipline exists to prevent, applied here to a paper instead of code.
+
+Real adaptations made, not blind ports:
+- **`n=12`** for the windowing base discretization grid, matching `shape_slat_flow_model_512`'s
+  actual real production step count (`pipeline.json`), not an arbitrary finer virtual grid the
+  paper's own Flux/SD3.5 experiments don't specify a value for. This ties the implementation
+  directly to the project's real research question (does distillation hold up starting from an
+  already-short, already-calibrated schedule) — querying the teacher at invented finer virtual
+  timesteps it was never calibrated near would quietly dodge the exact risk this project exists to
+  test. Real, deliberate consequence: the paper's `{2,4,...,n/4}` coarse-skip set collapses to just
+  `{2}` at `n=12`.
+- Confirmed the paper's Eq (17) timestep shift (`S_s(t) = st/(1+(s-1)t)`) is **algebraically
+  identical** to this project's own `FlowEulerSampler`'s `rescale_t` mechanism — same formula,
+  different name, not a coincidence worth re-deriving from scratch. The real production
+  `rescale_t=3.0` already falls inside the paper's own default `s ∈ [2.5,4.5]` sampling range.
+- Adapted the windowed-interpolation target (Eq 12) and the batch's teacher/self-distill split for
+  `SparseTensor.feats` (variable per-sample token count) via real sub-batch `SparseTensor`
+  indexing + `sparse_cat`, not a flattened boolean mask (would not respect per-sample token-count
+  variability).
+- Targets are built using the model's **real production CFG** behavior (guidance_strength=7.5,
+  guidance_rescale=0.5, guidance_interval=(0.6,1.0), read from the real `pipeline.json`), not a
+  bare unguided forward pass — reimplemented per-batch-element rather than reusing the existing
+  sampler mixins, since those assume one shared scalar `t` for the whole batch (true during
+  iterative sampling), incompatible with SCFM training's need for a different `t` per element
+  within one forward pass.
+
+Also fixed a real, separate gap found while sanity-checking that the new file even imports:
+`BasicTrainer` (used by every trainer in this repo) unconditionally imports `tensorboard`, never
+listed in `requirements_macos_core.txt` — nothing had exercised the training path on macOS until
+this phase. Added, pinned to the installed version.
+
+Verified only at the "imports cleanly, class MRO resolves, shift-grid formula is numerically
+correct" level so far — real correctness verification (gradient flow, finite loss, a real
+forward+backward pass on Phase 0's real encoded pilot data) is Phase 2, deliberately not done yet.
 
 ### Phase 2 — correctness verification (this project's established methodology)
 - Synthetic check: gradient flow to every trainable parameter, finite loss, no NaNs.
