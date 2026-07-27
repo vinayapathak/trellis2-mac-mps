@@ -1,5 +1,20 @@
 import argparse, sys, os, math, io
 from typing import *
+
+# On macOS, Blender.app's own bundled site-packages isn't writable, so install_pillow.py's pip
+# falls back to a user-site install (e.g. ~/.local/lib/python3.13/site-packages) -- confirmed via
+# pip itself reporting "Requirement already satisfied: Pillow" there. A plain `blender -b`
+# invocation doesn't add that directory to sys.path on its own (confirmed: even explicitly setting
+# PYTHONPATH in the subprocess environment before launching Blender did NOT fix this, so Blender's
+# embedded Python appears to ignore PYTHONPATH -- this has to be done from inside the running
+# interpreter instead). Glob for it (robust to Blender's bundled Python version) rather than
+# hardcoding "3.13".
+if sys.platform == 'darwin':
+    import glob
+    for _p in glob.glob(os.path.expanduser('~/.local/lib/python3.*/site-packages')):
+        if _p not in sys.path:
+            sys.path.append(_p)
+
 import bpy
 import bmesh
 from mathutils import Vector, Matrix

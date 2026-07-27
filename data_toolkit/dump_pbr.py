@@ -53,7 +53,7 @@ def _dump_pbr(file_path, metadatum, root):
         ]
         if file_path.endswith('.blend'):
             args.insert(1, file_path)
-        
+
         call(args, stdout=DEVNULL, stderr=DEVNULL)
         
         if os.path.exists(temp_path):
