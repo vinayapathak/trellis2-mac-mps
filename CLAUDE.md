@@ -211,12 +211,25 @@ outputs:**
   `mesh/rasterizer: metal` -- not the pure-PyTorch fallback.
 - Timings: `pipeline_load` 524.8s (includes the remaining weight downloads), `generation` 543.9s,
   `pbr_export` 118.9s, **total 1188.5s (~19.8 min)**. `peak_rss_bytes`: ~11.1GB.
-- This is, as far as this project can tell, the **first confirmed real end-to-end TRELLIS.2
+- **CORRECTION (later session, found while researching competing acceleration efforts -- see the
+  "search online" work in this project's history): the claim below is wrong and should not have
+  been asserted without checking first.** `shivampkumar/trellis-mac` -- explicitly listed as "no
+  documented successful run" above -- was in fact reviewed hands-on and confirmed working, real,
+  end-to-end (photo in, real 400K+-vertex textured mesh out, ~3.5-5 min on M4 Pro) in a public
+  writeup dated **April 20, 2026** (lilting.ch, with a follow-up M1 Max verification dated
+  2026-04-21) -- three months before this run. Re-verified via a fresh, independent search before
+  writing this correction, not just recalled from memory. What likely *is* still real and specific
+  to this project, based on everything checked: this port used compiled Metal kernels for the
+  sparse math (flex_gemm-equivalent) rather than a slow pure-PyTorch/gather-scatter fallback --
+  `shivampkumar/trellis-mac`'s own writeup states its sparse convolution ran "~10x slower than
+  CUDA's flex_gemm" for exactly that reason. Original text, kept for the correction to be legible,
+  not deleted:
+  ~~This is, as far as this project can tell, the **first confirmed real end-to-end TRELLIS.2
   generation on any Apple Silicon Mac, gated weights and all** -- none of the prior community
   efforts (`pedronaugusto/trellis2-apple`, `shivampkumar/trellis-mac`) or PR #175 itself have a
   documented successful real-checkpoint run; all prior validation on this exact machine (M5 Max)
   was capability-probe-only (base MPS/MLX/SDPA and the accelerated Metal extension stack), not
-  real generation.
+  real generation.~~
 
 Also fixed a stale `.gitignore` entry found in the process: `output/` (singular) never matched
 this project's actual `outputs/` (plural) convention, per this project's own README examples --
