@@ -112,9 +112,9 @@ Checked directly, not assumed:
 
 ### Phase 0 — data pipeline validation (no distillation code yet)
 
-**Status: partially complete.** Metadata, download, mesh-dump, and PBR-dump stages verified working
-on a real 196-object ObjaverseXL(sketchfab) pilot slice at `/tmp/pilot_test`. O-Voxel conversion and
-latent encoding not yet attempted.
+**Status: partially complete.** Metadata, download, mesh-dump, PBR-dump, and O-Voxel-conversion
+stages verified working on a real 196-object ObjaverseXL(sketchfab) pilot slice at
+`/tmp/pilot_test`. Latent encoding not yet attempted.
 
 Real, unplanned finding along the way: this repo's `data_toolkit/` (and the identical upstream
 microsoft/TRELLIS.2 repo, confirmed via GitHub API) documents a `datasets.<SUBSET>` plugin
@@ -156,11 +156,39 @@ Concrete progress, in order:
   `Mix Shader`, `Color Attribute`) this baking pipeline doesn't handle; real-world 3D assets have
   material complexity this toolkit's PBR extraction wasn't built to cover. Not chased further —
   86% is a solid, real pilot yield, not a target to push to 100%.
-- ⬜ O-Voxel conversion (`dual_grid.py`/`voxelize_pbr.py`), latent encoding
-  (`encode_shape_latent.py`/`encode_ss_latent.py`) — not yet attempted. Each is a real, separate
-  unknown (own external requirements, own possible interface gaps against the same
-  never-shipped-connector pattern already found three times) — do not assume they'll "just work"
-  either.
+- ✅ O-Voxel conversion (`dual_grid.py`/`voxelize_pbr.py`): the deepest gap found so far — the
+  vendored `o-voxel` C++ extension (`o_voxel._C`) had never been built at all in this checkout, so
+  `o_voxel.io`/`o_voxel.serialize` were completely non-functional (`import` itself failed). Root
+  cause was mechanical, not algorithmic: `setup.py`'s own CPU-build branch requires
+  `src/ext_cpu.cpp`, which simply didn't exist, even though the real CPU geometry implementations
+  (`flexible_dual_grid.cpp`, `volumetic_attr.cpp` — 775/872 lines, complete, not stubs) already do.
+  Wrote `ext_cpu.cpp` (`ext.cpp`, the CUDA-era entry point, trimmed to only the CPU-available
+  bindings). That surfaced two more real, mechanical compiler-strictness gaps (this vendored code
+  was presumably only ever validated on Linux/gcc or nvcc): 8 fatal `-Wc++11-narrowing` errors
+  (`size_t`→`long long`/`int` in brace-init lists) across `filter_parent.cpp`, `svo.cpp`,
+  `filter_neighbor.cpp`, `flexible_dual_grid.cpp` — fixed with explicit casts; and 2 `invalid
+  suffix 'd' on floating constant` errors (`1e-6d`, `0.0d` — not valid C++) — fixed by dropping the
+  suffix. Also found the `o-voxel/third_party/eigen` submodule was declared but never initialized
+  in this checkout (empty directory) — `git submodule update --init` fixed it (no commit needed,
+  the parent repo's gitlink already pointed at the right commit). One more real gap: the z-order/
+  Hilbert (de)serialize CPU functions live in `.cu` files alongside CUDA-only `__global__` kernels
+  (can't compile without nvcc, and the shared headers can't even be included in a CPU build) — wrote
+  `serialize_cpu.cpp`, the CPU logic ported verbatim with CUDA decorators stripped. Caught a real
+  bug of my own here before shipping it: my first draft stored `.contiguous().data_ptr()` from a
+  temporary tensor in a separate statement, so for any non-contiguous input (exactly what
+  `serialize.py`'s `coords[:, i]` column-slicing always produces) the pointer was already dangling
+  before use — a trivial all-zero round-trip test decoded to garbage, which is what caught it, not
+  the build succeeding. Fixed by holding the contiguous copies as named locals spanning the whole
+  function; re-verified the z_order/Hilbert round-trip explicitly against a genuinely
+  non-contiguous strided tensor view. Also added `no_file` support to `ObjaverseXL.py`'s
+  `foreach_instance` (TRELLIS.2's own `dual_grid.py`/`voxelize_pbr.py` call it with
+  `no_file=True` since those stages read mesh_dumps/pbr_dumps by sha256, not from a raw downloaded
+  file — the ported v1 `foreach_instance` had no such mode). Real result once everything built:
+  **196/196** dual-grid conversions (resolution 64) and **168/168** PBR voxelizations (resolution
+  64, i.e. all PBR-dumped objects), both exit code 0, zero errors.
+- ⬜ Latent encoding (`encode_shape_latent.py`/`encode_ss_latent.py`) — not yet attempted. Same
+  caution as before: a real, separate unknown, own external requirements, own possible interface
+  gaps against the same never-shipped-connector pattern — do not assume it'll "just work" either.
 - Exit criterion (still not met): a real, small, correctly-encoded training set on disk, shaped/
   typed correctly for `shape_slat_flow_model_512`'s real training config.
 
